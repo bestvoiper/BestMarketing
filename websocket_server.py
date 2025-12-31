@@ -279,7 +279,7 @@ class StatsWebSocketServer:
                 logger.debug(f"📡 Intentando obtener detalles de {campaign_name} desde Redis...")
                 
                 # Verificar si la campaña está en caché (activa o finalizada)
-                is_in_cache = await redis_manager.is_campaign_in_cache(campaign_name)
+                is_in_cache = redis_manager.is_campaign_in_cache(campaign_name)
                 
                 if not is_in_cache:
                     # 🔄 Campaña no en caché, verificar si está finalizada en MySQL y cargarla
@@ -296,7 +296,7 @@ class StatsWebSocketServer:
                 
                 if is_in_cache:
                     # Obtener estadísticas desde Redis
-                    stats = await redis_manager.get_campaign_stats(campaign_name)
+                    stats = redis_manager.get_campaign_stats(campaign_name)
                     
                     if stats:
                         logger.info(f"✅ Estadísticas de {campaign_name} obtenidas desde Redis (caché)")

@@ -132,31 +132,27 @@ class AudioSender(BaseSender):
     
     def _build_originate_string(self, numero: str, uuid: str) -> str:
         """Construye el string de originate para FreeSWITCH"""
-        if amd_type and amd_type.upper() == "PRO":
-            # Con AMD: primero detecta, luego transfiere
-            originate_str = (
+        if self.amd_type and self.amd_type.upper() == "PRO":
+            # Con AMD: primero detecta, luego reproduce audio
+            return (
                 f"bgapi originate "
-                f"{{ignore_early_media=false,"
+                f"{{ignore_early_media=true,"
                 f"origination_uuid={uuid},"
-                f"campaign_name='{campaign_name}',"
-                f"campaign_type='Discador',"
-                f"dialer_queue='{cola_destino}',"
-                f"origination_caller_id_number='{numero}',"
-                f"execute_on_answer='transfer {cola_destino} XML {contexto}'}}"
-                f"sofia/gateway/{GATEWAY}/{numero} 2222 XML DETECT_AMD_DIALER"
+                f"campaign_name='{self.campaign_name}',"
+                f"campaign_type='Audio',"
+                f"origination_caller_id_number='{numero}'}}"
+                f"sofia/gateway/{GATEWAY}/{numero} 2222 XML DETECT_AMD"
             )
         else:
-            # Sin AMD: transfiere directo cuando contesta
-            originate_str = (
+            # Sin AMD - directo al audio
+            return (
                 f"bgapi originate "
-                f"{{ignore_early_media=false,"
+                f"{{ignore_early_media=true,"
                 f"origination_uuid={uuid},"
-                f"campaign_name='{campaign_name}',"
-                f"campaign_type='Discador',"
-                f"dialer_queue='{cola_destino}',"
-                f"origination_caller_id_number='{numero}',"
-                f"execute_on_answer='transfer {cola_destino} XML {contexto}'}}"
-                f"sofia/gateway/{GATEWAY}/{numero} &park()"
+                f"campaign_name='{self.campaign_name}',"
+                f"campaign_type='Audio',"
+                f"origination_caller_id_number='{numero}'}}"
+                f"sofia/gateway/{GATEWAY}/{numero} &playback({self.audio_file})"
             )
     
     async def send_single(self, item: dict) -> tuple:

@@ -625,6 +625,56 @@ class RedisCallManager:
             logger.error(f"Error conectando con Redis: {e}")
             return False
     
+    def is_campaign_in_cache(self, campaign_name: str) -> bool:
+        """
+        Verifica si una campaña tiene datos en caché de Redis
+        
+        Args:
+            campaign_name: Nombre de la campaña
+            
+        Returns:
+            True si la campaña tiene datos en Redis
+        """
+        try:
+            # Verificar si existen claves para esta campaña
+            pattern = f"campaign:{campaign_name}:*"
+            keys = self.redis_client.keys(pattern)
+            return len(keys) > 0
+        except Exception as e:
+            logger.error(f"Error verificando caché de campaña: {e}")
+            return False
+    
+    async def load_finished_campaign_on_demand(self, campaign_name: str) -> bool:
+        """
+        Carga una campaña finalizada desde MySQL a Redis bajo demanda
+        
+        Args:
+            campaign_name: Nombre de la campaña
+            
+        Returns:
+            True si se cargó exitosamente
+        """
+        try:
+            # Verificar si la campaña existe en MySQL
+            with self.mysql_engine.connect() as conn:
+                result = conn.execute(text("""
+                    SELECT nombre, tipo, activo FROM campanas WHERE nombre = :nombre
+                """), {"nombre": campaign_name}).fetchone()
+                
+                if not result:
+                    return False
+                
+                # Crear entrada básica en Redis
+                key = self._get_campaign_key(campaign_name, "stats")
+                self.redis_client.hset(key, "campaign_name", json.dumps(campaign_name))
+                self.redis_client.hset(key, "loaded_from_mysql", json.dumps(True))
+                self.redis_client.expire(key, 86400)  # 24 horas TTL
+                
+                return True
+        except Exception as e:
+            logger.error(f"Error cargando campaña desde MySQL: {e}")
+            return False
+    
     def create_stats_table(self, campaign_name: str) -> bool:
         """
         Crea una tabla de estadísticas para una campaña con nomenclatura estadisticas_{campaign_name}
