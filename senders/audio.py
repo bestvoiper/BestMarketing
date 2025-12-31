@@ -329,7 +329,7 @@ class AudioSender(BaseSender):
             
             with self.engine.connect() as conn:
                 result = conn.execute(text(f"""
-                    SELECT DISTINCT telefono, nombre, datos
+                    SELECT DISTINCT telefono
                     FROM `{self.campaign_name}`
                     WHERE (
                         estado = 'pendiente'
@@ -346,8 +346,6 @@ class AudioSender(BaseSender):
                     if not self.is_active(numero):
                         items.append({
                             "telefono": numero,
-                            "nombre": row[1] if len(row) > 1 else None,
-                            "datos": row[2] if len(row) > 2 else None,
                         })
                 
                 return items
