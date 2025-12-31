@@ -102,10 +102,10 @@ class AudioSender(BaseSender):
             self.amd_type = config.get("amd", "PRO")
             self.cps = config.get("cps", CPS_GLOBAL)
             
-            # Obtener audio de la campaña
+            # Obtener audio de la campaña desde la columna archivo_audio
             with self.engine.connect() as conn:
                 result = conn.execute(text("""
-                    SELECT audio FROM campanas WHERE nombre = :nombre
+                    SELECT archivo_audio FROM campanas WHERE nombre = :nombre
                 """), {"nombre": self.campaign_name}).fetchone()
                 
                 if result and result[0]:

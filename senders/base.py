@@ -214,27 +214,28 @@ class BaseSender(ABC):
         try:
             with self.engine.connect() as conn:
                 result = conn.execute(text("""
-                    SELECT cps, reintentos, horarios, activo, api_config,
+                    SELECT reintentos, horarios, activo, api_config,
                            mensaje_template, cola_destino, contexto
                     FROM campanas 
                     WHERE nombre = :nombre
                 """), {"nombre": self.campaign_name}).fetchone()
                 
                 if result:
+                    # CPS se obtiene de config pasada por campaign_sender (distribución dinámica)
                     return {
-                        "cps": result[0] or 10,
-                        "max_retries": result[1] or 3,
-                        "schedule": result[2],
-                        "active": result[3],
-                        "api_config": result[4],
-                        "template": result[5],
-                        "queue": result[6],
-                        "context": result[7],
+                        "cps": self.config.get("cps", 30),  # CPS viene del orquestador
+                        "max_retries": result[0] or 3,
+                        "schedule": result[1],
+                        "active": result[2],
+                        "api_config": result[3],
+                        "template": result[4],
+                        "queue": result[5],
+                        "context": result[6],
                     }
         except Exception as e:
             self.logger.error(f"Error obteniendo config: {e}")
         
-        return {"cps": 10, "max_retries": 3, "active": "S"}
+        return {"cps": self.config.get("cps", 30), "max_retries": 3, "active": "S"}
     
     async def get_pending_items(self, max_items: int = 100) -> list:
         """Obtiene elementos pendientes de la campaña"""

@@ -887,3 +887,36 @@ class RedisCallManager:
             logger.error(f"❌ Error en sincronización automática: {e}")
             return {}
 
+
+# =============================================================================
+# SINGLETON - Instancia global del Redis Manager
+# =============================================================================
+_redis_manager_instance = None
+
+def get_redis_manager(host='localhost', port=6379, db=0, mysql_url=None) -> RedisCallManager:
+    """
+    Obtiene la instancia singleton del Redis Manager.
+    
+    Args:
+        host: Host de Redis
+        port: Puerto de Redis
+        db: Base de datos de Redis
+        mysql_url: URL de conexión a MySQL
+    
+    Returns:
+        Instancia de RedisCallManager
+    """
+    global _redis_manager_instance
+    
+    if _redis_manager_instance is None:
+        _redis_manager_instance = RedisCallManager(
+            host=host,
+            port=port,
+            db=db,
+            mysql_url=mysql_url
+        )
+        logger.info("✅ Redis Manager inicializado")
+    
+    return _redis_manager_instance
+
+

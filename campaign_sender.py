@@ -27,6 +27,12 @@ logger = get_logger("campaign_sender")
 # Pool de conexiones BD
 engine = create_db_engine(pool_size=30, max_overflow=15)
 
+# =============================================================================
+# CONFIGURACIÓN DE CPS GLOBAL PARA AUDIO Y DISCADOR
+# =============================================================================
+CPS_TOTAL_DISPONIBLE = 60  # CPS máximo a distribuir entre Audio y Discador
+CPS_TIPOS_TELEFONICOS = {'Audio', 'Discador'}  # Tipos que consumen CPS telefónicos
+
 # Redis opcional
 REDIS_AVAILABLE = False
 redis_client = None
@@ -104,16 +110,16 @@ async def get_active_campaigns() -> list:
     
     try:
         with engine.connect() as conn:
-            # Campañas activas
+            # Campañas activas (sin columna cps - se calculará dinámicamente)
             result = conn.execute(text("""
-                SELECT nombre, tipo, cps, reintentos, horarios
+                SELECT nombre, tipo, reintentos, horarios
                 FROM campanas
                 WHERE activo = 'S'
                 AND (fecha_programada IS NULL OR fecha_programada <= NOW())
             """)).fetchall()
             
             for row in result:
-                nombre, tipo, cps, reintentos, horarios = row
+                nombre, tipo, reintentos, horarios = row
                 
                 # Verificar que el tipo es soportado
                 if tipo not in SENDER_REGISTRY:
@@ -127,7 +133,6 @@ async def get_active_campaigns() -> list:
                 campaigns.append({
                     "nombre": nombre,
                     "tipo": tipo,
-                    "cps": cps or 10,
                     "reintentos": reintentos or 3,
                     "horarios": horarios
                 })
@@ -151,6 +156,47 @@ async def get_active_campaigns() -> list:
     
     except Exception as e:
         logger.error(f"Error obteniendo campañas: {e}")
+    
+    # Distribuir CPS inteligentemente entre campañas telefónicas
+    campaigns = distribute_cps(campaigns)
+    
+    return campaigns
+
+
+def distribute_cps(campaigns: list) -> list:
+    """
+    Distribuye los 60 CPS disponibles entre campañas de Audio y Discador.
+    Los otros tipos (WhatsApp, Email, SMS, etc.) tienen sus propios límites.
+    """
+    # Separar campañas telefónicas (Audio/Discador) de las demás
+    telefonicas = [c for c in campaigns if c["tipo"] in CPS_TIPOS_TELEFONICOS]
+    otras = [c for c in campaigns if c["tipo"] not in CPS_TIPOS_TELEFONICOS]
+    
+    if telefonicas:
+        # Distribuir CPS equitativamente entre campañas telefónicas
+        cps_por_campana = CPS_TOTAL_DISPONIBLE // len(telefonicas)
+        cps_restante = CPS_TOTAL_DISPONIBLE % len(telefonicas)
+        
+        for i, camp in enumerate(telefonicas):
+            # Asignar CPS base + 1 extra a las primeras si hay resto
+            camp["cps"] = cps_por_campana + (1 if i < cps_restante else 0)
+            logger.debug(f"📊 [{camp['nombre']}] CPS asignado: {camp['cps']}")
+        
+        logger.info(f"📊 CPS distribuido: {CPS_TOTAL_DISPONIBLE} entre {len(telefonicas)} campañas telefónicas")
+    
+    # Asignar CPS por defecto a campañas no telefónicas (no comparten el límite de 60)
+    CPS_DEFAULTS = {
+        'WhatsApp': 50,
+        'Telegram': 50,
+        'Facebook': 50,
+        'Email': 100,
+        'SMS': 50,
+    }
+    
+    for camp in otras:
+        camp["cps"] = CPS_DEFAULTS.get(camp["tipo"], 30)
+    
+    return telefonicas + otras
     
     return campaigns
 
