@@ -75,7 +75,8 @@ class DialerSender(BaseSender):
         self.overdial_ratio = DIALER_OVERDIAL_RATIO
         self.amd_type = "PRO"
         self.max_concurrent = DIALER_MAX_CONCURRENT_CALLS
-        self.cps = DIALER_CPS_GLOBAL
+        # CPS viene del orquestador (distribución dinámica de 60 CPS)
+        self.cps = config.get("cps", DIALER_CPS_GLOBAL) if config else DIALER_CPS_GLOBAL
         
         # Métricas de agentes
         self.available_agents = 0
@@ -109,14 +110,20 @@ class DialerSender(BaseSender):
             self.amd_type = config.get("amd", "PRO")
             self.cps = config.get("cps", DIALER_CPS_GLOBAL)
             
-            # Obtener overdial
+            # Obtener overdial - columna puede no existir
             try:
                 with self.engine.connect() as conn:
                     result = conn.execute(text("""
-                        SELECT overdial_ratio FROM campanas WHERE nombre = :nombre
-                    """), {"nombre": self.campaign_name}).fetchone()
-                    if result and result[0]:
-                        self.overdial_ratio = float(result[0])
+                        SELECT 1 FROM information_schema.columns 
+                        WHERE table_name = 'campanas' AND column_name = 'overdial_ratio'
+                    """)).fetchone()
+                    
+                    if result:
+                        result = conn.execute(text("""
+                            SELECT overdial_ratio FROM campanas WHERE nombre = :nombre
+                        """), {"nombre": self.campaign_name}).fetchone()
+                        if result and result[0]:
+                            self.overdial_ratio = float(result[0])
             except:
                 pass
             
@@ -146,30 +153,37 @@ class DialerSender(BaseSender):
         """Obtiene agentes disponibles para la cola"""
         try:
             with self.engine.connect() as conn:
-                result = conn.execute(text("""
-                    SELECT 
-                        COUNT(*) as total,
-                        SUM(CASE WHEN estado = 'disponible' THEN 1 ELSE 0 END) as disponibles,
-                        SUM(CASE WHEN estado = 'en_llamada' THEN 1 ELSE 0 END) as ocupados
-                    FROM agentes
-                    WHERE cola = :cola AND activo = 'S'
-                """), {"cola": self.cola_destino}).fetchone()
+                # Verificar si la tabla agentes existe
+                table_check = conn.execute(text("""
+                    SELECT COUNT(*) FROM information_schema.tables 
+                    WHERE table_schema = DATABASE() AND table_name = 'agentes'
+                """)).scalar()
                 
-                if result:
-                    self.total_agents = result[0] or 0
-                    self.available_agents = result[1] or 0
-                    return {
-                        "total": self.total_agents,
-                        "available": self.available_agents,
-                        "busy": result[2] or 0
-                    }
-        except:
-            pass
+                if table_check:
+                    result = conn.execute(text("""
+                        SELECT 
+                            COUNT(*) as total,
+                            SUM(CASE WHEN estado = 'disponible' THEN 1 ELSE 0 END) as disponibles,
+                            SUM(CASE WHEN estado = 'en_llamada' THEN 1 ELSE 0 END) as ocupados
+                        FROM agentes
+                        WHERE cola = :cola AND activo = 'S'
+                    """), {"cola": self.cola_destino}).fetchone()
+                    
+                    if result:
+                        self.total_agents = result[0] or 0
+                        self.available_agents = result[1] or 0
+                        return {
+                            "total": self.total_agents,
+                            "available": self.available_agents,
+                            "busy": result[2] or 0
+                        }
+        except Exception as e:
+            self.logger.debug(f"Tabla agentes no disponible: {e}")
         
-        # Default si no hay tabla agentes
-        self.total_agents = 5
-        self.available_agents = 3
-        return {"total": 5, "available": 3, "busy": 2}
+        # Default si no hay tabla agentes - simular agentes disponibles
+        self.total_agents = 10
+        self.available_agents = 5
+        return {"total": 10, "available": 5, "busy": 5}
     
     def calculate_abandon_rate(self) -> float:
         """Calcula tasa de abandono"""
@@ -379,8 +393,7 @@ class DialerSender(BaseSender):
         try:
             with self.engine.connect() as conn:
                 result = conn.execute(text(f"""
-                    SELECT estado, hangup_cause, fecha_envio, fecha_transfer,
-                           agente_extension, duracion_agente
+                    SELECT estado, hangup_cause, fecha_envio
                     FROM `{self.campaign_name}`
                     WHERE telefono = :numero
                 """), {"numero": item_id}).fetchone()
@@ -390,9 +403,6 @@ class DialerSender(BaseSender):
                         "estado": result[0],
                         "hangup_cause": result[1],
                         "fecha_envio": str(result[2]) if result[2] else None,
-                        "fecha_transfer": str(result[3]) if result[3] else None,
-                        "agente": result[4],
-                        "duracion_agente": result[5],
                     }
         except:
             pass
@@ -406,7 +416,7 @@ class DialerSender(BaseSender):
             
             with self.engine.connect() as conn:
                 result = conn.execute(text(f"""
-                    SELECT DISTINCT telefono, nombre, datos
+                    SELECT DISTINCT telefono
                     FROM `{self.campaign_name}`
                     WHERE (
                         estado = 'pendiente'
@@ -421,11 +431,7 @@ class DialerSender(BaseSender):
                 for row in result:
                     numero = row[0]
                     if not self.is_active(numero):
-                        items.append({
-                            "telefono": numero,
-                            "nombre": row[1] if len(row) > 1 else None,
-                            "datos": row[2] if len(row) > 2 else None,
-                        })
+                        items.append({"telefono": numero})
                 
                 return items
         except Exception as e:
