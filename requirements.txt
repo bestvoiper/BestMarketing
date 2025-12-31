@@ -1,0 +1,8 @@
+redis==5.0.1
+websockets==12.0
+sqlalchemy==2.0.23
+pymysql==1.1.0
+asyncio
+
+# Nota: ESL bindings de FreeSWITCH deben instalarse manualmente
+# No están disponibles en PyPI, usar los bindings oficiales de FreeSWITCH
