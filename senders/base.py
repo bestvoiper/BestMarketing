@@ -214,8 +214,7 @@ class BaseSender(ABC):
         try:
             with self.engine.connect() as conn:
                 result = conn.execute(text("""
-                    SELECT reintentos, horarios, activo, api_config,
-                           mensaje_template, cola_destino, contexto
+                    SELECT reintentos, horarios, activo
                     FROM campanas 
                     WHERE nombre = :nombre
                 """), {"nombre": self.campaign_name}).fetchone()
@@ -227,10 +226,6 @@ class BaseSender(ABC):
                         "max_retries": result[0] or 3,
                         "schedule": result[1],
                         "active": result[2],
-                        "api_config": result[3],
-                        "template": result[4],
-                        "queue": result[5],
-                        "context": result[6],
                     }
         except Exception as e:
             self.logger.error(f"Error obteniendo config: {e}")
