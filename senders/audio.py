@@ -132,27 +132,31 @@ class AudioSender(BaseSender):
     
     def _build_originate_string(self, numero: str, uuid: str) -> str:
         """Construye el string de originate para FreeSWITCH"""
-        if self.amd_type and self.amd_type.upper() == "PRO":
-            # Con AMD
-            return (
+        if amd_type and amd_type.upper() == "PRO":
+            # Con AMD: primero detecta, luego transfiere
+            originate_str = (
                 f"bgapi originate "
-                f"{{ignore_early_media=true,"
+                f"{{ignore_early_media=false,"
                 f"origination_uuid={uuid},"
-                f"campaign_name='{self.campaign_name}',"
-                f"campaign_type='Audio',"
-                f"origination_caller_id_number='{numero}'}}"
-                f"sofia/gateway/{GATEWAY}/{numero} 2222 XML DETECT_AMD"
+                f"campaign_name='{campaign_name}',"
+                f"campaign_type='Discador',"
+                f"dialer_queue='{cola_destino}',"
+                f"origination_caller_id_number='{numero}',"
+                f"execute_on_answer='transfer {cola_destino} XML {contexto}'}}"
+                f"sofia/gateway/{GATEWAY}/{numero} 2222 XML DETECT_AMD_DIALER"
             )
         else:
-            # Sin AMD - directo al audio
-            return (
+            # Sin AMD: transfiere directo cuando contesta
+            originate_str = (
                 f"bgapi originate "
-                f"{{ignore_early_media=true,"
+                f"{{ignore_early_media=false,"
                 f"origination_uuid={uuid},"
-                f"campaign_name='{self.campaign_name}',"
-                f"campaign_type='Audio',"
-                f"origination_caller_id_number='{numero}'}}"
-                f"sofia/gateway/{GATEWAY}/{numero} &playback({self.audio_file})"
+                f"campaign_name='{campaign_name}',"
+                f"campaign_type='Discador',"
+                f"dialer_queue='{cola_destino}',"
+                f"origination_caller_id_number='{numero}',"
+                f"execute_on_answer='transfer {cola_destino} XML {contexto}'}}"
+                f"sofia/gateway/{GATEWAY}/{numero} &park()"
             )
     
     async def send_single(self, item: dict) -> tuple:
