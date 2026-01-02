@@ -36,6 +36,7 @@ CPS_TIPOS_TELEFONICOS = {'Audio', 'Discador'}  # Tipos que consumen CPS telefón
 # Redis opcional
 REDIS_AVAILABLE = False
 redis_client = None
+redis_manager = None
 try:
     import redis
     redis_client = redis.Redis(
@@ -45,6 +46,14 @@ try:
     redis_client.ping()
     REDIS_AVAILABLE = True
     logger.info("✅ Redis conectado")
+    
+    # Cargar RedisCallManager para limpieza de datos
+    try:
+        from redis_manager import RedisCallManager
+        redis_manager = RedisCallManager(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
+        logger.info("✅ RedisCallManager disponible para limpieza de caché")
+    except Exception as e:
+        logger.warning(f"⚠️ RedisCallManager no disponible: {e}")
 except:
     logger.warning("⚠️ Redis no disponible")
 
@@ -202,6 +211,14 @@ async def process_campaign(campaign_info: dict):
     tipo = campaign_info["tipo"]
     
     logger.info(f"🚀 [{nombre}] Iniciando campaña tipo {tipo}")
+    
+    # 🧹 Limpiar datos antiguos de Redis antes de iniciar
+    if REDIS_AVAILABLE and redis_manager:
+        try:
+            redis_manager.clear_campaign_data(nombre)
+            logger.info(f"🧹 [{nombre}] Caché de Redis limpiado para nueva ejecución")
+        except Exception as e:
+            logger.warning(f"⚠️ [{nombre}] Error limpiando caché Redis: {e}")
     
     try:
         # Obtener clase de sender

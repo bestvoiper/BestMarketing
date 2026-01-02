@@ -31,6 +31,11 @@ class RedisCallManager:
         )
         self.cps_window = 3  # Ventana de 3 segundos para CPS preciso y estable
         
+        # Prefijos para claves de Redis
+        self.PREFIX_CALL = "call:"
+        self.PREFIX_CAMPAIGN = "campaign:"
+        self.PREFIX_GLOBAL = "global:"
+        
         # Configurar conexión a MySQL para sincronización
         self.mysql_url = mysql_url or "mysql+pymysql://consultas:consultas@localhost/masivos"
         self.mysql_engine = create_engine(self.mysql_url, pool_pre_ping=True)
@@ -563,13 +568,25 @@ class RedisCallManager:
             campaign_name: Nombre de la campaña
         """
         try:
-            # 1. Eliminar todas las claves específicas de la campaña
+            total_deleted = 0
+            
+            # 1. Eliminar todas las claves específicas de la campaña (campaign:*)
             pattern = f"campaign:{campaign_name}:*"
             keys = self.redis_client.keys(pattern)
             
             if keys:
                 self.redis_client.delete(*keys)
-                logger.info(f"✅ {len(keys)} claves de campaña {campaign_name} eliminadas de Redis")
+                total_deleted += len(keys)
+                logger.info(f"✅ {len(keys)} claves campaign:{campaign_name}:* eliminadas de Redis")
+            
+            # 2. Eliminar llamadas individuales (call:campaign_name:*)
+            call_pattern = f"{self.PREFIX_CALL}{campaign_name}:*"
+            call_keys = self.redis_client.keys(call_pattern)
+            
+            if call_keys:
+                self.redis_client.delete(*call_keys)
+                total_deleted += len(call_keys)
+                logger.info(f"✅ {len(call_keys)} claves call:{campaign_name}:* eliminadas de Redis")
             
             # 2. Limpiar llamadas de esta campaña del registro global
             try:
@@ -607,7 +624,7 @@ class RedisCallManager:
             except Exception as e:
                 logger.warning(f"⚠️ Error limpiando CPS global: {e}")
             
-            logger.info(f"✅ Datos de campaña {campaign_name} completamente eliminados de Redis")
+            logger.info(f"✅ Datos de campaña {campaign_name} completamente eliminados de Redis (total: {total_deleted} claves)")
                 
         except Exception as e:
             logger.error(f"❌ Error limpiando datos de campaña en Redis: {e}")

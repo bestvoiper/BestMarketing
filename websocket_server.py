@@ -23,16 +23,24 @@ json.dumps = json_dumps
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Importar Redis Manager
+# Importar configuración de Redis desde shared_config
+try:
+    from shared_config import REDIS_HOST, REDIS_PORT, REDIS_DB
+except ImportError:
+    REDIS_HOST = 'localhost'
+    REDIS_PORT = 6379
+    REDIS_DB = 0
+
+# Importar Redis Manager con configuración correcta
 try:
     from redis_manager import get_redis_manager
-    redis_manager = get_redis_manager()
+    redis_manager = get_redis_manager(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
     REDIS_AVAILABLE = True
     logger.info("✅ Redis Manager disponible para WebSocket")
-except ImportError:
+except Exception as e:
     REDIS_AVAILABLE = False
     redis_manager = None
-    logger.warning("⚠️ Redis Manager no disponible - usando solo MySQL")
+    logger.warning(f"⚠️ Redis Manager no disponible: {e}")
 
 class StatsWebSocketServer:
     def __init__(self, host="0.0.0.0", port=8765):
@@ -302,7 +310,7 @@ class StatsWebSocketServer:
                         logger.info(f"✅ Estadísticas de {campaign_name} obtenidas desde Redis (caché)")
                         
                         # Obtener datos de la campaña
-                        campaign_key = redis_manager._get_campaign_key(campaign_name)
+                        campaign_key = redis_manager._get_campaign_key(campaign_name, "stats")
                         campaign_data_raw = redis_manager.redis_client.hgetall(campaign_key)
                         
                         campaign_dict = {}
