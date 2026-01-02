@@ -29,14 +29,11 @@ except:
     REDIS_AVAILABLE = False
     redis_client = None
 
-# WebSocket opcional
-try:
-    from websocket_server import send_stats_to_websocket, send_event_to_websocket
-    WEBSOCKET_AVAILABLE = True
-except ImportError:
-    WEBSOCKET_AVAILABLE = False
-    async def send_stats_to_websocket(*args, **kwargs): pass
-    async def send_event_to_websocket(*args, **kwargs): pass
+# WebSocket se maneja desde state_updater.py, no importar aquí
+# para evitar conflicto de puerto 8765
+WEBSOCKET_AVAILABLE = False
+async def send_stats_to_websocket(*args, **kwargs): pass
+async def send_event_to_websocket(*args, **kwargs): pass
 
 
 @dataclass

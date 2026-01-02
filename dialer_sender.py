@@ -64,14 +64,9 @@ except Exception as e:
     redis_client = None
     logger.warning(f"⚠️ Redis no disponible: {e}")
 
-# WebSocket
-try:
-    from websocket_server import send_stats_to_websocket, send_event_to_websocket
-    WEBSOCKET_AVAILABLE = True
-    logger.info("✅ WebSocket disponible")
-except ImportError:
-    WEBSOCKET_AVAILABLE = False
-    logger.info("⚠️ WebSocket no disponible")
+# WebSocket se maneja desde state_updater.py, no importar aquí
+# para evitar conflicto de puerto 8765
+WEBSOCKET_AVAILABLE = False
 
 # Pool de conexiones BD
 engine = create_db_engine(pool_size=50, max_overflow=25)

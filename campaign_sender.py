@@ -48,14 +48,9 @@ try:
 except:
     logger.warning("⚠️ Redis no disponible")
 
-# WebSocket opcional
-try:
-    from websocket_server import send_stats_to_websocket, send_event_to_websocket
-    WEBSOCKET_AVAILABLE = True
-except ImportError:
-    WEBSOCKET_AVAILABLE = False
-    async def send_stats_to_websocket(*args, **kwargs): pass
-    async def send_event_to_websocket(*args, **kwargs): pass
+# WebSocket se maneja desde state_updater.py, no importar aquí
+# para evitar conflicto de puerto 8765
+WEBSOCKET_AVAILABLE = False
 
 # Control global
 RUNNING = True
@@ -222,9 +217,8 @@ async def process_campaign(campaign_info: dict):
         # Ejecutar
         stats = await sender.run()
         
-        # Enviar estadísticas finales
-        if WEBSOCKET_AVAILABLE:
-            await send_stats_to_websocket(stats.to_dict())
+        # Nota: Las estadísticas se envían desde state_updater.py
+        # No enviamos aquí para evitar conflicto de puerto WebSocket
         
         logger.info(f"✅ [{nombre}] Campaña finalizada")
         
@@ -334,19 +328,12 @@ async def campaign_monitor():
 
 
 async def stats_broadcaster():
-    """Envía estadísticas periódicas por WebSocket"""
-    if not WEBSOCKET_AVAILABLE:
-        return
-    
-    while RUNNING:
-        try:
-            for nombre, sender in list(ACTIVE_CAMPAIGNS.items()):
-                stats = sender.stats.to_dict()
-                await send_stats_to_websocket(stats)
-            
-            await asyncio.sleep(2)
-        except:
-            await asyncio.sleep(5)
+    """
+    Nota: Las estadísticas ahora se envían desde state_updater.py
+    Esta función queda deshabilitada para evitar conflicto de puerto WebSocket
+    """
+    # Deshabilitado - el WebSocket se maneja en state_updater.py
+    return
 
 
 async def shutdown():
