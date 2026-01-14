@@ -98,22 +98,74 @@ def is_in_schedule(horario_str: str) -> bool:
         return True
 
 
+def calculate_auto_cps(campaigns_by_type: dict) -> dict:
+    """
+    Calcula CPS automático para cada campaña.
+    Máximo global: 60 CPS divididos entre campañas de Audio y Discador.
+    """
+    MAX_CPS_GLOBAL = 60
+    DEFAULT_CPS = {
+        'Audio': 30,      # CPS por defecto para Audio
+        'Discador': 15,   # CPS por defecto para Discador
+    }
+    
+    # Contar campañas de llamadas (Audio y Discador)
+    audio_count = len(campaigns_by_type.get('Audio', []))
+    discador_count = len(campaigns_by_type.get('Discador', []))
+    total_call_campaigns = audio_count + discador_count
+    
+    cps_allocation = {}
+    
+    if total_call_campaigns == 0:
+        return cps_allocation
+    
+    # Distribuir 60 CPS entre las campañas de llamadas
+    # Audio tiene prioridad ligeramente mayor (ratio 2:1 aprox)
+    if audio_count > 0 and discador_count > 0:
+        # Dividir: 60% para Audio, 40% para Discador
+        audio_total_cps = int(MAX_CPS_GLOBAL * 0.6)
+        discador_total_cps = MAX_CPS_GLOBAL - audio_total_cps
+        
+        cps_per_audio = max(5, audio_total_cps // audio_count)
+        cps_per_discador = max(3, discador_total_cps // discador_count)
+    elif audio_count > 0:
+        # Solo Audio: todos los 60 CPS
+        cps_per_audio = max(5, MAX_CPS_GLOBAL // audio_count)
+        cps_per_discador = 0
+    else:
+        # Solo Discador: todos los 60 CPS
+        cps_per_audio = 0
+        cps_per_discador = max(3, MAX_CPS_GLOBAL // discador_count)
+    
+    # Asignar CPS a cada campaña
+    for nombre in campaigns_by_type.get('Audio', []):
+        cps_allocation[nombre] = min(cps_per_audio, DEFAULT_CPS['Audio'])
+    
+    for nombre in campaigns_by_type.get('Discador', []):
+        cps_allocation[nombre] = min(cps_per_discador, DEFAULT_CPS['Discador'])
+    
+    return cps_allocation
+
+
 async def get_active_campaigns() -> list:
     """Obtiene campañas activas de todos los tipos"""
     campaigns = []
+    campaigns_by_type = {}  # Para calcular CPS automático
     
     try:
         with engine.connect() as conn:
-            # Campañas activas
+            # Campañas activas (sin columna cps - se calcula automáticamente)
             result = conn.execute(text("""
-                SELECT nombre, tipo, cps, reintentos, horarios
+                SELECT nombre, tipo, reintentos, horarios
                 FROM campanas
                 WHERE activo = 'S'
                 AND (fecha_programada IS NULL OR fecha_programada <= NOW())
             """)).fetchall()
             
+            # Primera pasada: recolectar campañas válidas por tipo
+            valid_campaigns = []
             for row in result:
-                nombre, tipo, cps, reintentos, horarios = row
+                nombre, tipo, reintentos, horarios = row
                 
                 # Verificar que el tipo es soportado
                 if tipo not in SENDER_REGISTRY:
@@ -124,13 +176,41 @@ async def get_active_campaigns() -> list:
                 if not is_in_schedule(horarios):
                     continue
                 
-                campaigns.append({
+                valid_campaigns.append({
                     "nombre": nombre,
                     "tipo": tipo,
-                    "cps": cps or 10,
                     "reintentos": reintentos or 3,
                     "horarios": horarios
                 })
+                
+                # Agrupar por tipo para cálculo de CPS
+                if tipo not in campaigns_by_type:
+                    campaigns_by_type[tipo] = []
+                campaigns_by_type[tipo].append(nombre)
+            
+            # Calcular CPS automático (máx 60 dividido entre Audio y Discador)
+            cps_allocation = calculate_auto_cps(campaigns_by_type)
+            
+            # Segunda pasada: asignar CPS calculado
+            for camp in valid_campaigns:
+                nombre = camp["nombre"]
+                tipo = camp["tipo"]
+                
+                # CPS automático para Audio/Discador, valor por defecto para otros
+                if nombre in cps_allocation:
+                    camp["cps"] = cps_allocation[nombre]
+                else:
+                    # Otros tipos (WhatsApp, Email, etc.) - valores por defecto
+                    default_cps_map = {
+                        'WhatsApp': 50,
+                        'Telegram': 50,
+                        'Facebook': 50,
+                        'Email': 100,
+                        'SMS': 50,
+                    }
+                    camp["cps"] = default_cps_map.get(tipo, 10)
+                
+                campaigns.append(camp)
             
             # Reactivar pausadas que entran en horario
             paused = conn.execute(text("""
