@@ -213,23 +213,25 @@ class BaseSender(ABC):
         """Obtiene configuración de la campaña desde BD"""
         try:
             with self.engine.connect() as conn:
+                # CPS se calcula automáticamente (no desde BD)
+                # Usar queue_relationated en lugar de cola_destino
+                # contexto no se usa - siempre es el nombre de la campaña
                 result = conn.execute(text("""
-                    SELECT cps, reintentos, horarios, activo, api_config,
-                           mensaje_template, cola_destino, contexto
+                    SELECT reintentos, horarios, activo, api_config,
+                           mensaje_template, queue_relationated
                     FROM campanas 
                     WHERE nombre = :nombre
                 """), {"nombre": self.campaign_name}).fetchone()
                 
                 if result:
                     return {
-                        "cps": result[0] or 10,
-                        "max_retries": result[1] or 3,
-                        "schedule": result[2],
-                        "active": result[3],
-                        "api_config": result[4],
-                        "template": result[5],
-                        "queue": result[6],
-                        "context": result[7],
+                        "cps": 10,  # CPS automático
+                        "max_retries": result[0] or 3,
+                        "schedule": result[1],
+                        "active": result[2],
+                        "api_config": result[3],
+                        "template": result[4],
+                        "queue": result[5],
                     }
         except Exception as e:
             self.logger.error(f"Error obteniendo config: {e}")

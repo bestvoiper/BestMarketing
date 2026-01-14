@@ -107,7 +107,6 @@ class DialerSender(BaseSender):
         
         # Configuración Discador
         self.cola_destino = DIALER_DEFAULT_QUEUE
-        self.contexto = DIALER_DEFAULT_CONTEXT
         self.overdial_ratio = DIALER_OVERDIAL_RATIO
         self.amd_type = "PRO"
         self.max_concurrent = DIALER_MAX_CONCURRENT_CALLS
@@ -155,7 +154,6 @@ class DialerSender(BaseSender):
             # Obtener configuración de campaña
             config = self.get_campaign_config()
             self.cola_destino = config.get("queue", DIALER_DEFAULT_QUEUE)
-            self.contexto = config.get("context", DIALER_DEFAULT_CONTEXT)
             self.amd_type = config.get("amd", "PRO")
             self.cps = config.get("cps", DIALER_CPS_GLOBAL)
             
@@ -419,31 +417,34 @@ class DialerSender(BaseSender):
         self.stats.extra_data["abandon_rate"] = abandon_rate
     
     def _build_originate_string(self, numero: str, uuid: str) -> str:
-        """Construye el originate con transfer a cola"""
+        """Construye el originate con transfer al IVR de la campaña (igual que Audio)"""
+        # El transfer va al IVR de la campaña (dialplan con nombre de campaña)
+        # El IVR decide a qué cola transferir después
+        # queue_relationated es solo para monitoreo AMI, no para el transfer
         if self.amd_type and self.amd_type.upper() == "PRO":
-            # Con AMD: detecta y luego transfiere
+            # Con AMD: detecta y luego transfiere al IVR
             return (
                 f"bgapi originate "
                 f"{{ignore_early_media=false,"
                 f"origination_uuid={uuid},"
                 f"campaign_name='{self.campaign_name}',"
                 f"campaign_type='Discador',"
-                f"dialer_queue='{self.cola_destino}',"
+                f"dialer_queue='{self.queue_relationated}',"
                 f"origination_caller_id_number='{numero}',"
-                f"execute_on_answer='transfer {self.cola_destino} XML {self.contexto}'}}"
+                f"execute_on_answer='transfer 9999 XML {self.campaign_name}'}}"
                 f"sofia/gateway/{GATEWAY}/{numero} 2222 XML DETECT_AMD_DIALER"
             )
         else:
-            # Sin AMD: transfer directo
+            # Sin AMD: transfer directo al IVR
             return (
                 f"bgapi originate "
                 f"{{ignore_early_media=false,"
                 f"origination_uuid={uuid},"
                 f"campaign_name='{self.campaign_name}',"
                 f"campaign_type='Discador',"
-                f"dialer_queue='{self.cola_destino}',"
+                f"dialer_queue='{self.queue_relationated}',"
                 f"origination_caller_id_number='{numero}',"
-                f"execute_on_answer='transfer {self.cola_destino} XML {self.contexto}'}}"
+                f"execute_on_answer='transfer 9999 XML {self.campaign_name}'}}"
                 f"sofia/gateway/{GATEWAY}/{numero} &park()"
             )
     

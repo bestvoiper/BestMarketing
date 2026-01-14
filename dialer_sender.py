@@ -355,9 +355,12 @@ def get_campaign_config(campaign_name: str) -> dict:
     
     try:
         with engine.connect() as conn:
+            # CPS se calcula automáticamente (máx 60 dividido entre campañas activas)
+            # Usar queue_relationated en lugar de cola_destino
+            # contexto no se usa - siempre es el nombre de la campaña
             result = conn.execute(text("""
-                SELECT amd, horarios, activo, cola_destino, contexto, 
-                       cps, max_concurrent, overdial_ratio
+                SELECT amd, horarios, activo, queue_relationated, 
+                       max_concurrent, overdial_ratio
                 FROM campanas 
                 WHERE nombre = :nombre
             """), {"nombre": campaign_name}).fetchone()
@@ -368,10 +371,9 @@ def get_campaign_config(campaign_name: str) -> dict:
                     "horarios": result[1],
                     "activo": result[2],
                     "cola_destino": result[3] or DIALER_DEFAULT_QUEUE,
-                    "contexto": result[4] or DIALER_DEFAULT_CONTEXT,
-                    "cps": result[5] or DIALER_CPS_GLOBAL,
-                    "max_concurrent": result[6] or DIALER_MAX_CONCURRENT_CALLS,
-                    "overdial_ratio": float(result[7]) if result[7] else DIALER_OVERDIAL_RATIO,
+                    "cps": DIALER_CPS_GLOBAL,  # CPS automático
+                    "max_concurrent": result[4] or DIALER_MAX_CONCURRENT_CALLS,
+                    "overdial_ratio": float(result[5]) if result[5] else DIALER_OVERDIAL_RATIO,
                     "timestamp": current_time
                 }
                 CAMPAIGN_CONFIG_CACHE[campaign_name] = config
@@ -384,7 +386,6 @@ def get_campaign_config(campaign_name: str) -> dict:
         "horarios": None,
         "activo": "S",
         "cola_destino": DIALER_DEFAULT_QUEUE,
-        "contexto": DIALER_DEFAULT_CONTEXT,
         "cps": DIALER_CPS_GLOBAL,
         "max_concurrent": DIALER_MAX_CONCURRENT_CALLS,
         "overdial_ratio": DIALER_OVERDIAL_RATIO,
@@ -615,11 +616,10 @@ async def send_calls_for_dialer_campaign(
     # Obtener configuración
     config = get_campaign_config(campaign_name)
     cola_destino = config.get("cola_destino", DIALER_DEFAULT_QUEUE)
-    contexto = config.get("contexto", DIALER_DEFAULT_CONTEXT)
     amd_type = config.get("amd", "PRO")
     stats.overdial_ratio = config.get("overdial_ratio", DIALER_OVERDIAL_RATIO)
     
-    log(f"📞 [{campaign_name}] Cola destino: {cola_destino} | Contexto: {contexto}")
+    log(f"📞 [{campaign_name}] Cola AMI: {cola_destino} | IVR: {campaign_name}")
     log(f"📊 [{campaign_name}] CPS: {cps} | Overdial: {stats.overdial_ratio}")
     
     # Conexión ESL
@@ -766,8 +766,11 @@ async def send_calls_for_dialer_campaign(
             # - ignore_early_media=false para detectar cuando contesta
             # - execute_on_answer transfiere a la cola
             
+            # El transfer va al IVR de la campaña (dialplan con nombre de campaña)
+            # El IVR decide a qué cola transferir después
+            # cola_destino (queue_relationated) es solo para monitoreo AMI
             if amd_type and amd_type.upper() == "PRO":
-                # Con AMD: primero detecta, luego transfiere
+                # Con AMD: primero detecta, luego transfiere al IVR
                 originate_str = (
                     f"bgapi originate "
                     f"{{ignore_early_media=false,"
@@ -776,11 +779,11 @@ async def send_calls_for_dialer_campaign(
                     f"campaign_type='Discador',"
                     f"dialer_queue='{cola_destino}',"
                     f"origination_caller_id_number='{numero}',"
-                    f"execute_on_answer='transfer {cola_destino} XML {contexto}'}}"
+                    f"execute_on_answer='transfer 9999 XML {campaign_name}'}}"
                     f"sofia/gateway/{GATEWAY}/{numero} 2222 XML DETECT_AMD_DIALER"
                 )
             else:
-                # Sin AMD: transfiere directo cuando contesta
+                # Sin AMD: transfiere directo al IVR cuando contesta
                 originate_str = (
                     f"bgapi originate "
                     f"{{ignore_early_media=false,"
@@ -789,7 +792,7 @@ async def send_calls_for_dialer_campaign(
                     f"campaign_type='Discador',"
                     f"dialer_queue='{cola_destino}',"
                     f"origination_caller_id_number='{numero}',"
-                    f"execute_on_answer='transfer {cola_destino} XML {contexto}'}}"
+                    f"execute_on_answer='transfer 9999 XML {campaign_name}'}}"
                     f"sofia/gateway/{GATEWAY}/{numero} &park()"
                 )
             
