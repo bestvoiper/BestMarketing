@@ -29,11 +29,14 @@ except:
     REDIS_AVAILABLE = False
     redis_client = None
 
-# WebSocket se maneja desde state_updater.py, no importar aquí
-# para evitar conflicto de puerto 8765
-WEBSOCKET_AVAILABLE = False
-async def send_stats_to_websocket(*args, **kwargs): pass
-async def send_event_to_websocket(*args, **kwargs): pass
+# WebSocket opcional
+try:
+    from websocket_server import send_stats_to_websocket, send_event_to_websocket
+    WEBSOCKET_AVAILABLE = True
+except ImportError:
+    WEBSOCKET_AVAILABLE = False
+    async def send_stats_to_websocket(*args, **kwargs): pass
+    async def send_event_to_websocket(*args, **kwargs): pass
 
 
 @dataclass
@@ -211,23 +214,27 @@ class BaseSender(ABC):
         try:
             with self.engine.connect() as conn:
                 result = conn.execute(text("""
-                    SELECT reintentos, horarios, activo
+                    SELECT cps, reintentos, horarios, activo, api_config,
+                           mensaje_template, cola_destino, contexto
                     FROM campanas 
                     WHERE nombre = :nombre
                 """), {"nombre": self.campaign_name}).fetchone()
                 
                 if result:
-                    # CPS se obtiene de config pasada por campaign_sender (distribución dinámica)
                     return {
-                        "cps": self.config.get("cps", 30),  # CPS viene del orquestador
-                        "max_retries": result[0] or 3,
-                        "schedule": result[1],
-                        "active": result[2],
+                        "cps": result[0] or 10,
+                        "max_retries": result[1] or 3,
+                        "schedule": result[2],
+                        "active": result[3],
+                        "api_config": result[4],
+                        "template": result[5],
+                        "queue": result[6],
+                        "context": result[7],
                     }
         except Exception as e:
             self.logger.error(f"Error obteniendo config: {e}")
         
-        return {"cps": self.config.get("cps", 30), "max_retries": 3, "active": "S"}
+        return {"cps": 10, "max_retries": 3, "active": "S"}
     
     async def get_pending_items(self, max_items: int = 100) -> list:
         """Obtiene elementos pendientes de la campaña"""

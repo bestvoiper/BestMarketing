@@ -31,11 +31,6 @@ class RedisCallManager:
         )
         self.cps_window = 3  # Ventana de 3 segundos para CPS preciso y estable
         
-        # Prefijos para claves de Redis
-        self.PREFIX_CALL = "call:"
-        self.PREFIX_CAMPAIGN = "campaign:"
-        self.PREFIX_GLOBAL = "global:"
-        
         # Configurar conexión a MySQL para sincronización
         self.mysql_url = mysql_url or "mysql+pymysql://consultas:consultas@localhost/masivos"
         self.mysql_engine = create_engine(self.mysql_url, pool_pre_ping=True)
@@ -568,25 +563,13 @@ class RedisCallManager:
             campaign_name: Nombre de la campaña
         """
         try:
-            total_deleted = 0
-            
-            # 1. Eliminar todas las claves específicas de la campaña (campaign:*)
+            # 1. Eliminar todas las claves específicas de la campaña
             pattern = f"campaign:{campaign_name}:*"
             keys = self.redis_client.keys(pattern)
             
             if keys:
                 self.redis_client.delete(*keys)
-                total_deleted += len(keys)
-                logger.info(f"✅ {len(keys)} claves campaign:{campaign_name}:* eliminadas de Redis")
-            
-            # 2. Eliminar llamadas individuales (call:campaign_name:*)
-            call_pattern = f"{self.PREFIX_CALL}{campaign_name}:*"
-            call_keys = self.redis_client.keys(call_pattern)
-            
-            if call_keys:
-                self.redis_client.delete(*call_keys)
-                total_deleted += len(call_keys)
-                logger.info(f"✅ {len(call_keys)} claves call:{campaign_name}:* eliminadas de Redis")
+                logger.info(f"✅ {len(keys)} claves de campaña {campaign_name} eliminadas de Redis")
             
             # 2. Limpiar llamadas de esta campaña del registro global
             try:
@@ -624,7 +607,7 @@ class RedisCallManager:
             except Exception as e:
                 logger.warning(f"⚠️ Error limpiando CPS global: {e}")
             
-            logger.info(f"✅ Datos de campaña {campaign_name} completamente eliminados de Redis (total: {total_deleted} claves)")
+            logger.info(f"✅ Datos de campaña {campaign_name} completamente eliminados de Redis")
                 
         except Exception as e:
             logger.error(f"❌ Error limpiando datos de campaña en Redis: {e}")
@@ -640,56 +623,6 @@ class RedisCallManager:
             return self.redis_client.ping()
         except Exception as e:
             logger.error(f"Error conectando con Redis: {e}")
-            return False
-    
-    def is_campaign_in_cache(self, campaign_name: str) -> bool:
-        """
-        Verifica si una campaña tiene datos en caché de Redis
-        
-        Args:
-            campaign_name: Nombre de la campaña
-            
-        Returns:
-            True si la campaña tiene datos en Redis
-        """
-        try:
-            # Verificar si existen claves para esta campaña
-            pattern = f"campaign:{campaign_name}:*"
-            keys = self.redis_client.keys(pattern)
-            return len(keys) > 0
-        except Exception as e:
-            logger.error(f"Error verificando caché de campaña: {e}")
-            return False
-    
-    async def load_finished_campaign_on_demand(self, campaign_name: str) -> bool:
-        """
-        Carga una campaña finalizada desde MySQL a Redis bajo demanda
-        
-        Args:
-            campaign_name: Nombre de la campaña
-            
-        Returns:
-            True si se cargó exitosamente
-        """
-        try:
-            # Verificar si la campaña existe en MySQL
-            with self.mysql_engine.connect() as conn:
-                result = conn.execute(text("""
-                    SELECT nombre, tipo, activo FROM campanas WHERE nombre = :nombre
-                """), {"nombre": campaign_name}).fetchone()
-                
-                if not result:
-                    return False
-                
-                # Crear entrada básica en Redis
-                key = self._get_campaign_key(campaign_name, "stats")
-                self.redis_client.hset(key, "campaign_name", json.dumps(campaign_name))
-                self.redis_client.hset(key, "loaded_from_mysql", json.dumps(True))
-                self.redis_client.expire(key, 86400)  # 24 horas TTL
-                
-                return True
-        except Exception as e:
-            logger.error(f"Error cargando campaña desde MySQL: {e}")
             return False
     
     def create_stats_table(self, campaign_name: str) -> bool:
@@ -953,37 +886,4 @@ class RedisCallManager:
         except Exception as e:
             logger.error(f"❌ Error en sincronización automática: {e}")
             return {}
-
-
-# =============================================================================
-# SINGLETON - Instancia global del Redis Manager
-# =============================================================================
-_redis_manager_instance = None
-
-def get_redis_manager(host='localhost', port=6379, db=0, mysql_url=None) -> RedisCallManager:
-    """
-    Obtiene la instancia singleton del Redis Manager.
-    
-    Args:
-        host: Host de Redis
-        port: Puerto de Redis
-        db: Base de datos de Redis
-        mysql_url: URL de conexión a MySQL
-    
-    Returns:
-        Instancia de RedisCallManager
-    """
-    global _redis_manager_instance
-    
-    if _redis_manager_instance is None:
-        _redis_manager_instance = RedisCallManager(
-            host=host,
-            port=port,
-            db=db,
-            mysql_url=mysql_url
-        )
-        logger.info("✅ Redis Manager inicializado")
-    
-    return _redis_manager_instance
-
 

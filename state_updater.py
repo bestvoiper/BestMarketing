@@ -745,16 +745,9 @@ async def esl_event_listener(campaign_filter: str = None):
                 
                 if not campaign_name:
                     # Intentar obtener de UUID
-                    # Formato: audio_{campaign}_{numero}_{timestamp} o dialer_{campaign}_{numero}_{timestamp}
-                    # O simplemente: {campaign}_{numero}_{timestamp}
                     uuid = extract_field(event_str, "Unique-ID")
                     if uuid and "_" in uuid:
-                        parts = uuid.split("_")
-                        # Si empieza con "audio" o "dialer", el nombre de campaña es el segundo segmento
-                        if parts[0].lower() in ["audio", "dialer"] and len(parts) >= 2:
-                            campaign_name = parts[1]
-                        else:
-                            campaign_name = parts[0]
+                        campaign_name = uuid.split("_")[0]
                 
                 if not campaign_name:
                     continue

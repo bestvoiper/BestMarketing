@@ -1,13 +1,14 @@
 """
 Audio Sender Plugin - Campañas de audio con FreeSWITCH
 Reproduce mensajes de audio automáticos a los destinatarios.
-Basado en el patrón de call_sender.py para máximo rendimiento.
 """
 import asyncio
 import time
-from typing import Dict, Set, Optional
+import threading
+from typing import Dict, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from sqlalchemy import text
+from datetime import datetime, time as dt_time
 
 from .base import BaseSender, SenderStats
 
@@ -24,15 +25,6 @@ try:
     ESL_AVAILABLE = True
 except ImportError:
     ESL_AVAILABLE = False
-
-# Redis opcional
-try:
-    from redis_manager import get_redis_manager
-    redis_manager = get_redis_manager()
-    REDIS_AVAILABLE = redis_manager.ping()
-except:
-    REDIS_AVAILABLE = False
-    redis_manager = None
 
 logger = get_logger("audio_sender")
 
@@ -78,13 +70,13 @@ class AudioSender(BaseSender):
         # Tracking específico de Audio
         self.active_uuids: Set[str] = set()
         self.uuid_timestamps: Dict[str, float] = {}
+        self.active_numbers: Set[Tuple[str, str]] = set()
         
         # Configuración específica
         self.amd_type = "PRO"
         self.audio_file = None
-        self.destino = "9999"  # Destino para transferir después de AMD
         self.max_concurrent = GLOBAL_MAX_CONCURRENT_CALLS
-        self.cps = config.get("cps", CPS_GLOBAL) if config else CPS_GLOBAL
+        self.cps = CPS_GLOBAL
     
     async def initialize(self) -> bool:
         """Inicializa conexión ESL"""
@@ -95,7 +87,7 @@ class AudioSender(BaseSender):
         try:
             self.esl_connection = ESL.ESLconnection(
                 FREESWITCH_HOST, 
-                str(FREESWITCH_PORT), 
+                FREESWITCH_PORT, 
                 FREESWITCH_PASSWORD
             )
             
@@ -107,12 +99,13 @@ class AudioSender(BaseSender):
             
             # Obtener configuración de campaña
             config = self.get_campaign_config()
-            self.cps = config.get("cps", self.cps)
+            self.amd_type = config.get("amd", "PRO")
+            self.cps = config.get("cps", CPS_GLOBAL)
             
-            # Obtener audio de la campaña desde la columna archsubido
+            # Obtener audio de la campaña
             with self.engine.connect() as conn:
                 result = conn.execute(text("""
-                    SELECT archsubido FROM campanas WHERE nombre = :nombre
+                    SELECT audio FROM campanas WHERE nombre = :nombre
                 """), {"nombre": self.campaign_name}).fetchone()
                 
                 if result and result[0]:
@@ -122,7 +115,6 @@ class AudioSender(BaseSender):
                     self.logger.warning("⚠️ No se encontró audio configurado")
             
             self.stats.rate_max = self.cps
-            self.logger.info(f"📊 CPS configurado: {self.cps}")
             return True
             
         except Exception as e:
@@ -141,28 +133,27 @@ class AudioSender(BaseSender):
     def _build_originate_string(self, numero: str, uuid: str) -> str:
         """Construye el string de originate para FreeSWITCH"""
         if self.amd_type and self.amd_type.upper() == "PRO":
-            # Con AMD PRO: detecta y luego transfiere al dialplan que reproduce audio
+            # Con AMD
             return (
                 f"bgapi originate "
-                f"{{ignore_early_media=false,"
+                f"{{ignore_early_media=true,"
                 f"origination_uuid={uuid},"
                 f"campaign_name='{self.campaign_name}',"
                 f"campaign_type='Audio',"
-                f"origination_caller_id_number='{numero}',"
-                f"execute_on_answer='transfer {self.destino} XML {self.campaign_name}'}}"
-                f"sofia/gateway/{GATEWAY}/{numero} 2222 XML DETECT_AMD_PRO"
+                f"origination_caller_id_number='{numero}'}}"
+                f"sofia/gateway/{GATEWAY}/{numero} 2222 XML DETECT_AMD"
             )
         else:
             # Sin AMD - directo al audio
             return (
-                    f"bgapi originate "
-                    f"{{ignore_early_media=false,"
-                    f"origination_uuid={request.uuid},"
-                    f"campaign_name='{request.campaign_name}',"
-                    f"origination_caller_id_number='{request.numero}',"
-                    f"execute_on_answer='transfer {request.destino} XML {request.campaign_name}'}}"
-                    f"sofia/gateway/{GATEWAY}/{request.numero} &park()"
-                )
+                f"bgapi originate "
+                f"{{ignore_early_media=true,"
+                f"origination_uuid={uuid},"
+                f"campaign_name='{self.campaign_name}',"
+                f"campaign_type='Audio',"
+                f"origination_caller_id_number='{numero}'}}"
+                f"sofia/gateway/{GATEWAY}/{numero} &playback({self.audio_file})"
+            )
     
     async def send_single(self, item: dict) -> tuple:
         """Envía una sola llamada"""
@@ -212,55 +203,37 @@ class AudioSender(BaseSender):
                 lambda: self.esl_connection.api(originate_str)
             )
             
-            success = False
-            error_msg = ""
-            
             if response:
                 body = response.getBody()
                 success = "+OK" in body or "Job-UUID" in body
                 
                 if success:
-                    self.logger.info(f"📞 [{self.campaign_name}] Llamada enviada: {numero} | UUID: {uuid}")
-                    
-                    # Registrar en Redis
-                    if REDIS_AVAILABLE and redis_manager:
-                        try:
-                            redis_manager.register_call_sent(self.campaign_name)
-                        except:
-                            pass
-                    
                     return (numero, True, {"uuid": uuid, "status": "sent"})
                 else:
-                    error_msg = body[:100] if body else "Respuesta vacía"
-                    self.logger.warning(f"⚠️ [{self.campaign_name}] Llamada rechazada {numero}: {error_msg}")
-            else:
-                error_msg = "Sin respuesta de FreeSWITCH"
-                self.logger.error(f"❌ [{self.campaign_name}] Sin respuesta FS para {numero}")
+                    # Falló - actualizar estado
+                    self.release_active(numero)
+                    with self.engine.begin() as conn:
+                        conn.execute(text(f"""
+                            UPDATE `{self.campaign_name}` 
+                            SET estado = 'F', hangup_cause = 'ORIGINATE_FAILED'
+                            WHERE uuid = :uuid
+                        """), {"uuid": uuid})
+                    return (numero, False, {"error": body[:100]})
             
-            # Falló - actualizar estado
             self.release_active(numero)
-            self.active_uuids.discard(uuid)
-            with self.engine.begin() as conn:
-                conn.execute(text(f"""
-                    UPDATE `{self.campaign_name}` 
-                    SET estado = 'F', hangup_cause = 'ORIGINATE_FAILED'
-                    WHERE uuid = :uuid
-                """), {"uuid": uuid})
-            return (numero, False, {"error": error_msg})
+            return (numero, False, {"error": "no_response"})
             
         except Exception as e:
             self.release_active(numero)
-            self.active_uuids.discard(uuid)
             return (numero, False, {"error": str(e)})
     
     async def send_batch(self, items: list) -> list:
-        """Envía un lote de llamadas con control de CPS"""
+        """Envía un lote de llamadas"""
         results = []
-        delay = 1.0 / self.cps if self.cps > 0 else 0.1
         
-        self.logger.info(f"📞 [{self.campaign_name}] Enviando batch de {len(items)} llamadas a {self.cps} CPS")
-        
-        for i, item in enumerate(items):
+        # Preparar batch
+        batch_data = []
+        for item in items:
             numero = item.get('telefono', '')
             if not numero or not numero.strip().isdigit():
                 results.append((numero, False, {"error": "invalid"}))
@@ -269,32 +242,63 @@ class AudioSender(BaseSender):
             if self.is_active(numero):
                 continue
             
-            # Control de CPS
-            await asyncio.sleep(delay)
+            uuid = f"audio_{self.campaign_name}_{numero}_{int(time.time()*1000000)}"
+            originate_str = self._build_originate_string(numero, uuid)
+            batch_data.append((numero, uuid, originate_str))
             
-            # Verificar límite de concurrencia
-            while len(self.active_uuids) >= self.max_concurrent:
-                await asyncio.sleep(0.1)
-                self._cleanup_stale_uuids()
+            # Registrar
+            self.register_active(numero)
+            self.active_uuids.add(uuid)
+        
+        # Actualizar BD en batch
+        if batch_data:
+            try:
+                with self.engine.begin() as conn:
+                    for numero, uuid, _ in batch_data:
+                        conn.execute(text(f"""
+                            UPDATE `{self.campaign_name}` 
+                            SET uuid = :uuid, estado = 'P', fecha_envio = NOW(),
+                                intentos = COALESCE(intentos, 0) + 1
+                            WHERE telefono = :numero AND estado NOT IN ('S', 'C', 'P')
+                        """), {"uuid": uuid, "numero": numero})
+            except Exception as e:
+                self.logger.error(f"Error batch update: {e}")
+        
+        # Enviar originates
+        loop = asyncio.get_event_loop()
+        
+        MINI_BATCH = 5
+        DELAY = 0.35
+        
+        for i in range(0, len(batch_data), MINI_BATCH):
+            mini = batch_data[i:i+MINI_BATCH]
             
-            # Enviar llamada
-            result = await self.send_single(item)
-            results.append(result)
+            async def send_one(data):
+                numero, uuid, originate_str = data
+                try:
+                    response = await loop.run_in_executor(
+                        self.esl_executor,
+                        lambda: self.esl_connection.api(originate_str)
+                    )
+                    if response:
+                        body = response.getBody()
+                        success = "+OK" in body or "Job-UUID" in body
+                        return (numero, success, {"uuid": uuid})
+                    return (numero, False, {"error": "no_response"})
+                except Exception as e:
+                    return (numero, False, {"error": str(e)})
             
-            # Log progreso cada 50 llamadas
-            if (i + 1) % 50 == 0:
-                self.logger.info(f"📊 [{self.campaign_name}] Progreso: {i+1}/{len(items)}")
+            batch_results = await asyncio.gather(*[send_one(d) for d in mini])
+            
+            for r in batch_results:
+                results.append(r)
+                if not r[1]:  # Failed
+                    self.release_active(r[0])
+            
+            if i + MINI_BATCH < len(batch_data):
+                await asyncio.sleep(DELAY)
         
         return results
-    
-    def _cleanup_stale_uuids(self, max_age: float = 60.0):
-        """Limpia UUIDs obsoletos"""
-        current_time = time.time()
-        stale = [uuid for uuid, ts in self.uuid_timestamps.items() 
-                 if current_time - ts > max_age]
-        for uuid in stale:
-            self.active_uuids.discard(uuid)
-            self.uuid_timestamps.pop(uuid, None)
     
     async def check_status(self, item_id: str) -> dict:
         """Verifica estado de una llamada"""
@@ -325,7 +329,7 @@ class AudioSender(BaseSender):
             
             with self.engine.connect() as conn:
                 result = conn.execute(text(f"""
-                    SELECT DISTINCT telefono
+                    SELECT DISTINCT telefono, nombre, datos
                     FROM `{self.campaign_name}`
                     WHERE (
                         estado = 'pendiente'
@@ -340,7 +344,11 @@ class AudioSender(BaseSender):
                 for row in result:
                     numero = row[0]
                     if not self.is_active(numero):
-                        items.append({"telefono": numero})
+                        items.append({
+                            "telefono": numero,
+                            "nombre": row[1] if len(row) > 1 else None,
+                            "datos": row[2] if len(row) > 2 else None,
+                        })
                 
                 return items
         except Exception as e:
