@@ -1166,16 +1166,25 @@ class StatsWebSocketServer:
 
         # WS (sin cifrado)
         logger.info(f"Iniciando servidor WebSocket (WS) en {self.host}:{ws_port}")
-        ws_server = await websockets.serve(
-            self.register_client,
-            self.host,
-            ws_port,
-            ping_interval=20,
-            ping_timeout=10,
-            close_timeout=10,
-            ssl=None
-        )
-        logger.info(f"Servidor WebSocket iniciado en ws://{self.host}:{ws_port}")
+        try:
+            ws_server = await websockets.serve(
+                self.register_client,
+                self.host,
+                ws_port,
+                ping_interval=20,
+                ping_timeout=10,
+                close_timeout=10,
+                ssl=None
+            )
+            logger.info(f"Servidor WebSocket iniciado en ws://{self.host}:{ws_port}")
+        except OSError as e:
+            if "address already in use" in str(e).lower():
+                logger.debug(f"WebSocket ya está corriendo en puerto {ws_port}")
+                # Marcar como iniciado para evitar reintentos
+                self._server = True
+                self._server_ws = True
+                return
+            raise
 
         # WSS (con cifrado)
         cert_path = "/etc/asterisk/keys/asterisk-BestVoiper.crt"
