@@ -372,57 +372,33 @@ class DialerSender(BaseSender):
     
     async def get_available_agents(self) -> dict:
         """
-        Obtiene agentes disponibles para la cola.
+        Obtiene agentes disponibles para la cola via AMI (DialerClient).
         
-        Si DialerClient está conectado, usa información en tiempo real.
-        Si no, consulta la tabla de agentes como fallback.
+        La información de agentes SOLO viene de AMI a través del DialerClient.
+        Si no está conectado, no se envían llamadas (seguridad).
         """
         self.logger.info(f"🔍 Consultando agentes para cola: {self.cola_destino}")
         
-        # Si tenemos información actualizada del DialerClient, usarla
+        # Información de agentes viene SOLO de AMI via DialerClient
         if self.use_intelligent_dialing and self.last_queue_status:
             agents = self.last_queue_status.get("agents", {})
             self.total_agents = agents.get("total", 0)
             self.available_agents = agents.get("available", 0)
-            self.logger.info(f"📡 Agentes (DialerClient): total={self.total_agents}, disponibles={self.available_agents}")
+            self.logger.info(f"📡 Agentes (AMI): total={self.total_agents}, disponibles={self.available_agents}")
             return {
                 "total": self.total_agents,
                 "available": self.available_agents,
                 "busy": agents.get("busy", 0),
                 "paused": agents.get("paused", 0),
-                "source": "dialer_client"
+                "source": "ami"
             }
         
-        # Fallback: consultar BD
-        try:
-            with self.engine.connect() as conn:
-                result = conn.execute(text("""
-                    SELECT 
-                        COUNT(*) as total,
-                        SUM(CASE WHEN estado = 'disponible' THEN 1 ELSE 0 END) as disponibles,
-                        SUM(CASE WHEN estado = 'en_llamada' THEN 1 ELSE 0 END) as ocupados
-                    FROM agentes
-                    WHERE cola = :cola AND activo = 'S'
-                """), {"cola": self.cola_destino}).fetchone()
-                
-                if result:
-                    self.total_agents = result[0] or 0
-                    self.available_agents = result[1] or 0
-                    self.logger.debug(f"📊 Agentes BD: total={self.total_agents}, disponibles={self.available_agents}")
-                    return {
-                        "total": self.total_agents,
-                        "available": self.available_agents,
-                        "busy": result[2] or 0,
-                        "source": "database"
-                    }
-        except Exception as e:
-            self.logger.warning(f"⚠️ No se pudo consultar tabla agentes: {e}")
-        
-        # SEGURIDAD: Sin información de agentes = 0 agentes (no enviar llamadas)
-        self.logger.warning("⚠️ Sin información de agentes - no se enviarán llamadas")
+        # Sin DialerClient = Sin información de AMI = No marcar
+        self.logger.warning("⚠️ DialerClient no conectado - Sin información de agentes de AMI")
+        self.logger.warning("💡 Inicia el servidor AMI: python3 discador/check_queue.py")
         self.total_agents = 0
         self.available_agents = 0
-        return {"total": 0, "available": 0, "busy": 0, "source": "unknown"}
+        return {"total": 0, "available": 0, "busy": 0, "source": "no_ami"}
     
     def calculate_abandon_rate(self) -> float:
         """Calcula tasa de abandono"""
