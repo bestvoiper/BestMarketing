@@ -377,11 +377,14 @@ class DialerSender(BaseSender):
         Si DialerClient está conectado, usa información en tiempo real.
         Si no, consulta la tabla de agentes como fallback.
         """
+        self.logger.info(f"🔍 Consultando agentes para cola: {self.cola_destino}")
+        
         # Si tenemos información actualizada del DialerClient, usarla
         if self.use_intelligent_dialing and self.last_queue_status:
             agents = self.last_queue_status.get("agents", {})
             self.total_agents = agents.get("total", 0)
             self.available_agents = agents.get("available", 0)
+            self.logger.info(f"📡 Agentes (DialerClient): total={self.total_agents}, disponibles={self.available_agents}")
             return {
                 "total": self.total_agents,
                 "available": self.available_agents,
@@ -405,19 +408,21 @@ class DialerSender(BaseSender):
                 if result:
                     self.total_agents = result[0] or 0
                     self.available_agents = result[1] or 0
+                    self.logger.debug(f"📊 Agentes BD: total={self.total_agents}, disponibles={self.available_agents}")
                     return {
                         "total": self.total_agents,
                         "available": self.available_agents,
                         "busy": result[2] or 0,
                         "source": "database"
                     }
-        except:
-            pass
+        except Exception as e:
+            self.logger.warning(f"⚠️ No se pudo consultar tabla agentes: {e}")
         
-        # Default si no hay información
-        self.total_agents = 5
-        self.available_agents = 3
-        return {"total": 5, "available": 3, "busy": 2, "source": "default"}
+        # SEGURIDAD: Sin información de agentes = 0 agentes (no enviar llamadas)
+        self.logger.warning("⚠️ Sin información de agentes - no se enviarán llamadas")
+        self.total_agents = 0
+        self.available_agents = 0
+        return {"total": 0, "available": 0, "busy": 0, "source": "unknown"}
     
     def calculate_abandon_rate(self) -> float:
         """Calcula tasa de abandono"""
@@ -546,10 +551,13 @@ class DialerSender(BaseSender):
         Si no, usa lógica tradicional de overdial.
         """
         # Obtener estado actual de agentes
-        await self.get_available_agents()
+        self.logger.info(f"📋 send_batch() llamado con {len(items)} items")
+        agent_info = await self.get_available_agents()
+        self.logger.info(f"📊 Resultado agentes: {agent_info}")
         
         # === MODO INTELIGENTE ===
         if self.use_intelligent_dialing and self.last_queue_status:
+            self.logger.info("🧠 Usando MODO INTELIGENTE (DialerClient conectado)")
             # Verificar si podemos marcar
             if not self.can_dial:
                 self.logger.warning(f"⏸️ Marcado pausado: {self.dial_recommendation}")
@@ -596,8 +604,12 @@ class DialerSender(BaseSender):
         
         # === MODO TRADICIONAL ===
         else:
+            self.logger.info(f"📞 Usando MODO TRADICIONAL (sin DialerClient)")
+            self.logger.info(f"📊 Agentes disponibles: {self.available_agents} | Mínimo requerido: {DIALER_MIN_AGENTS}")
+            
             if self.available_agents < DIALER_MIN_AGENTS:
-                self.logger.warning(f"⏳ Solo {self.available_agents} agentes disponibles")
+                self.logger.warning(f"🚫 BLOQUEADO: Solo {self.available_agents} agentes (mínimo: {DIALER_MIN_AGENTS})")
+                self.logger.warning(f"⏳ No se enviarán llamadas hasta tener agentes suficientes")
                 return []
             
             # Ajustar overdial tradicional
@@ -605,7 +617,9 @@ class DialerSender(BaseSender):
             
             # Calcular batch size según agentes y overdial
             batch_size = int(self.available_agents * self.overdial_ratio)
+            self.logger.debug(f"📐 Cálculo: {self.available_agents} agentes × {self.overdial_ratio} ratio = {batch_size}")
             batch_size = min(batch_size, len(items), self.cps)
+            self.logger.debug(f"📐 Ajustado a min({batch_size}, {len(items)} items, {self.cps} cps) = {batch_size}")
             
             self.logger.info(
                 f"📞 Marcado tradicional: {batch_size} llamadas "
@@ -613,6 +627,7 @@ class DialerSender(BaseSender):
             )
         
         actual_batch = items[:batch_size]
+        self.logger.info(f"📦 Procesando batch de {len(actual_batch)} números")
         
         results = []
         batch_data = []
@@ -620,15 +635,18 @@ class DialerSender(BaseSender):
         for item in actual_batch:
             numero = item.get('telefono', '')
             if not numero or not numero.strip().isdigit():
+                self.logger.warning(f"⚠️ Número inválido: '{numero}'")
                 results.append((numero, False, {"error": "invalid"}))
                 continue
             
             if self.is_active(numero):
+                self.logger.debug(f"⏭️ Saltando {numero} (ya activo)")
                 continue
             
             uuid = f"dialer_{self.campaign_name}_{numero}_{int(time.time()*1000000)}"
             originate_str = self._build_originate_string(numero, uuid)
             batch_data.append((numero, uuid, originate_str))
+            self.logger.debug(f"✅ Preparado: {numero} -> {uuid}")
             
             self.register_active(numero)
             self.active_uuids.add(uuid)
@@ -667,6 +685,7 @@ class DialerSender(BaseSender):
             async def send_one(data):
                 numero, uuid, originate_str = data
                 try:
+                    self.logger.debug(f"📤 Enviando llamada: {numero}")
                     response = await loop.run_in_executor(
                         self.esl_executor,
                         lambda: self.esl_connection.api(originate_str)
@@ -674,9 +693,15 @@ class DialerSender(BaseSender):
                     if response:
                         body = response.getBody()
                         success = "+OK" in body or "Job-UUID" in body
+                        if success:
+                            self.logger.info(f"✅ Llamada iniciada: {numero} -> {uuid[:30]}...")
+                        else:
+                            self.logger.warning(f"❌ Fallo originate {numero}: {body[:80]}")
                         return (numero, success, {"uuid": uuid})
+                    self.logger.warning(f"❌ Sin respuesta ESL para {numero}")
                     return (numero, False, {"error": "no_response"})
                 except Exception as e:
+                    self.logger.error(f"❌ Error enviando {numero}: {e}")
                     return (numero, False, {"error": str(e)})
             
             batch_results = await asyncio.gather(*[send_one(d) for d in mini])
