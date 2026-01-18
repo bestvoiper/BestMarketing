@@ -213,26 +213,46 @@ class BaseSender(ABC):
         """Obtiene configuración de la campaña desde BD"""
         try:
             with self.engine.connect() as conn:
-                # CPS se calcula automáticamente (no desde BD)
-                # Usar queue_relationated en lugar de cola_destino
-                # contexto no se usa - siempre es el nombre de la campaña
-                result = conn.execute(text("""
-                    SELECT reintentos, horarios, activo, api_config,
-                           mensaje_template, queue_relationated
-                    FROM campanas 
-                    WHERE nombre = :nombre
-                """), {"nombre": self.campaign_name}).fetchone()
+                # Primero obtener las columnas disponibles en la tabla campanas
+                columns_result = conn.execute(text("""
+                    SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
+                    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'campanas'
+                """)).fetchall()
+                available_columns = {row[0].lower() for row in columns_result}
+                
+                # Construir query dinámicamente según columnas disponibles
+                select_cols = ["reintentos", "horarios", "activo"]
+                optional_cols = ["api_config", "mensaje_template", "queue_relationated"]
+                
+                for col in optional_cols:
+                    if col.lower() in available_columns:
+                        select_cols.append(col)
+                
+                query = f"SELECT {', '.join(select_cols)} FROM campanas WHERE nombre = :nombre"
+                result = conn.execute(text(query), {"nombre": self.campaign_name}).fetchone()
                 
                 if result:
-                    return {
+                    config = {
                         "cps": 10,  # CPS automático
                         "max_retries": result[0] or 3,
                         "schedule": result[1],
                         "active": result[2],
-                        "api_config": result[3],
-                        "template": result[4],
-                        "queue": result[5],
+                        "api_config": None,
+                        "template": None,
+                        "queue": None,
                     }
+                    # Mapear columnas opcionales
+                    col_idx = 3
+                    for col in optional_cols:
+                        if col.lower() in available_columns:
+                            if col == "api_config":
+                                config["api_config"] = result[col_idx]
+                            elif col == "mensaje_template":
+                                config["template"] = result[col_idx]
+                            elif col == "queue_relationated":
+                                config["queue"] = result[col_idx]
+                            col_idx += 1
+                    return config
         except Exception as e:
             self.logger.error(f"Error obteniendo config: {e}")
         

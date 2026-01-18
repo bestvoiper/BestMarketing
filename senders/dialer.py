@@ -160,30 +160,48 @@ class DialerSender(BaseSender):
             # Obtener configuración completa de discador desde BD
             try:
                 with self.engine.connect() as conn:
-                    result = conn.execute(text("""
-                        SELECT 
-                            overdial_ratio,
-                            queue_relationated,
-                            overdial_after_seconds,
-                            overdial_percent,
-                            overdial_multiplier,
-                            max_channels
-                        FROM campanas WHERE nombre = :nombre
-                    """), {"nombre": self.campaign_name}).fetchone()
+                    # Primero obtener las columnas disponibles
+                    columns_result = conn.execute(text("""
+                        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
+                        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'campanas'
+                    """)).fetchall()
+                    available_columns = {row[0].lower() for row in columns_result}
                     
-                    if result:
-                        if result[0]:
-                            self.overdial_ratio = float(result[0])
-                        if result[1]:
-                            self.queue_relationated = result[1]  # Cola para monitoreo AMI
-                        if result[2] is not None:
-                            self.overdial_after_seconds = int(result[2])
-                        if result[3] is not None:
-                            self.overdial_percent = int(result[3])
-                        if result[4] is not None:
-                            self.overdial_multiplier = int(result[4])
-                        if result[5] is not None:
-                            self.max_channels = int(result[5])
+                    # Construir query dinámicamente
+                    dialer_cols = [
+                        "overdial_ratio", "queue_relationated", "overdial_after_seconds",
+                        "overdial_percent", "overdial_multiplier", "max_channels"
+                    ]
+                    select_cols = [col for col in dialer_cols if col.lower() in available_columns]
+                    
+                    if select_cols:
+                        query = f"SELECT {', '.join(select_cols)} FROM campanas WHERE nombre = :nombre"
+                        result = conn.execute(text(query), {"nombre": self.campaign_name}).fetchone()
+                        
+                        self.logger.debug(f"🔍 Config BD para {self.campaign_name}: {result}")
+                        
+                        if result:
+                            col_map = {col: idx for idx, col in enumerate(select_cols)}
+                            
+                            if "overdial_ratio" in col_map and result[col_map["overdial_ratio"]]:
+                                self.overdial_ratio = float(result[col_map["overdial_ratio"]])
+                            if "queue_relationated" in col_map and result[col_map["queue_relationated"]]:
+                                self.queue_relationated = result[col_map["queue_relationated"]]
+                                self.logger.info(f"✅ queue_relationated desde BD: {self.queue_relationated}")
+                            else:
+                                self.logger.warning(f"⚠️ queue_relationated no disponible, usando default: {DIALER_DEFAULT_QUEUE}")
+                            if "overdial_after_seconds" in col_map and result[col_map["overdial_after_seconds"]] is not None:
+                                self.overdial_after_seconds = int(result[col_map["overdial_after_seconds"]])
+                            if "overdial_percent" in col_map and result[col_map["overdial_percent"]] is not None:
+                                self.overdial_percent = int(result[col_map["overdial_percent"]])
+                            if "overdial_multiplier" in col_map and result[col_map["overdial_multiplier"]] is not None:
+                                self.overdial_multiplier = int(result[col_map["overdial_multiplier"]])
+                            if "max_channels" in col_map and result[col_map["max_channels"]] is not None:
+                                self.max_channels = int(result[col_map["max_channels"]])
+                        else:
+                            self.logger.warning(f"⚠️ No se encontró campaña {self.campaign_name} en BD")
+                    else:
+                        self.logger.info(f"ℹ️ Columnas de discador no disponibles en BD, usando defaults")
             except Exception as e:
                 self.logger.warning(f"⚠️ Error obteniendo config de BD: {e}")
             
@@ -709,8 +727,22 @@ class DialerSender(BaseSender):
             max_retries = config.get("max_retries", 3)
             
             with self.engine.connect() as conn:
-                result = conn.execute(text(f"""
-                    SELECT DISTINCT telefono, nombre, datos
+                # Primero obtener las columnas disponibles en la tabla de campaña
+                columns_result = conn.execute(text(f"""
+                    SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
+                    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table_name
+                """), {"table_name": self.campaign_name}).fetchall()
+                available_columns = {row[0].lower() for row in columns_result}
+                
+                # Construir SELECT dinámicamente
+                select_cols = ["telefono"]
+                if "nombre" in available_columns:
+                    select_cols.append("nombre")
+                if "datos" in available_columns:
+                    select_cols.append("datos")
+                
+                query = f"""
+                    SELECT DISTINCT {', '.join(select_cols)}
                     FROM `{self.campaign_name}`
                     WHERE (
                         estado = 'pendiente'
@@ -719,17 +751,21 @@ class DialerSender(BaseSender):
                     )
                     AND estado NOT IN ('C', 'T', 'P', 'R', 'A', 'Q', 'M')
                     LIMIT :limit
-                """), {"max_retries": max_retries, "limit": max_items})
+                """
+                result = conn.execute(text(query), {"max_retries": max_retries, "limit": max_items})
                 
                 items = []
                 for row in result:
                     numero = row[0]
                     if not self.is_active(numero):
-                        items.append({
-                            "telefono": numero,
-                            "nombre": row[1] if len(row) > 1 else None,
-                            "datos": row[2] if len(row) > 2 else None,
-                        })
+                        item = {"telefono": numero}
+                        col_idx = 1
+                        if "nombre" in available_columns:
+                            item["nombre"] = row[col_idx] if col_idx < len(row) else None
+                            col_idx += 1
+                        if "datos" in available_columns:
+                            item["datos"] = row[col_idx] if col_idx < len(row) else None
+                        items.append(item)
                 
                 return items
         except Exception as e:
