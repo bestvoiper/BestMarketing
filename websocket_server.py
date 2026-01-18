@@ -1190,6 +1190,7 @@ class StatsWebSocketServer:
         cert_path = "/etc/asterisk/keys/asterisk-BestVoiper.crt"
         key_path = "/etc/asterisk/keys/asterisk-BestVoiper.key"
         ssl_context = None
+        wss_server = None  # Inicializar variable
         if os.path.exists(cert_path) and os.path.exists(key_path):
             try:
                 ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -1207,13 +1208,14 @@ class StatsWebSocketServer:
                 logger.info(f"Servidor WebSocket iniciado en wss://{self.host}:{wss_port}")
             except Exception as e:
                 logger.warning(f"No se pudo iniciar WSS: {e}")
+                wss_server = None
         else:
             logger.info("Certificados SSL no encontrados, solo se inicia WS.")
 
         # Guarda ambos servidores para cierre/control
         self._server = ws_server  # Solo guarda uno para compatibilidad, pero ambos están activos
         self._server_ws = ws_server
-        self._server_wss = wss_server if ssl_context else None
+        self._server_wss = wss_server
 
     async def ensure_running(self):
         if self._server is None:

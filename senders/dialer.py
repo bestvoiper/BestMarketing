@@ -51,7 +51,9 @@ except ImportError:
 logger = get_logger("dialer_sender")
 
 # Configuración WebSocket para DialerClient
-DIALER_WS_URL = "ws://tvnovedades.bestvoiper.com:8766"
+# Si check_queue.py corre en el mismo servidor, usar localhost
+# Si corre en otro servidor, cambiar a la IP correspondiente
+DIALER_WS_URL = "ws://127.0.0.1:8766"
 
 # Mapeo Hangup-Cause a estados Discador
 HANGUP_CAUSE_TO_DIALER_STATE = {
