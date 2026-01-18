@@ -133,27 +133,32 @@ class AudioSender(BaseSender):
     def _build_originate_string(self, numero: str, uuid: str) -> str:
         """Construye el string de originate para FreeSWITCH"""
         if self.amd_type and self.amd_type.upper() == "PRO":
-            # Con AMD
+            # Con AMD: detecta y luego transfiere al IVR
             return (
                 f"bgapi originate "
-                f"{{ignore_early_media=true,"
+                f"{{ignore_early_media=false,"
                 f"origination_uuid={uuid},"
                 f"campaign_name='{self.campaign_name}',"
-                f"campaign_type='Audio',"
-                f"origination_caller_id_number='{numero}'}}"
+                f"campaign_type='Discador',"
+                f"dialer_queue='{self.queue_relationated}',"
+                f"origination_caller_id_number='{numero}',"
+                f"execute_on_answer='transfer 9999 XML {self.campaign_name}'}}"
                 f"sofia/gateway/{GATEWAY}/{numero} 2222 XML DETECT_AMD"
             )
         else:
-            # Sin AMD - directo al audio
+            # Sin AMD: transfer directo al IVR
             return (
                 f"bgapi originate "
-                f"{{ignore_early_media=true,"
+                f"{{ignore_early_media=false,"
                 f"origination_uuid={uuid},"
                 f"campaign_name='{self.campaign_name}',"
-                f"campaign_type='Audio',"
-                f"origination_caller_id_number='{numero}'}}"
-                f"sofia/gateway/{GATEWAY}/{numero} &playback({self.audio_file})"
+                f"campaign_type='Discador',"
+                f"dialer_queue='{self.queue_relationated}',"
+                f"origination_caller_id_number='{numero}',"
+                f"execute_on_answer='transfer 9999 XML {self.campaign_name}'}}"
+                f"sofia/gateway/{GATEWAY}/{numero} &park()"
             )
+        
     
     async def send_single(self, item: dict) -> tuple:
         """Envía una sola llamada"""

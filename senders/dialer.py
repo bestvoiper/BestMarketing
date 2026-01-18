@@ -450,7 +450,7 @@ class DialerSender(BaseSender):
                 f"dialer_queue='{self.queue_relationated}',"
                 f"origination_caller_id_number='{numero}',"
                 f"execute_on_answer='transfer 9999 XML {self.campaign_name}'}}"
-                f"sofia/gateway/{GATEWAY}/{numero} 2222 XML DETECT_AMD_DIALER"
+                f"sofia/gateway/{GATEWAY}/{numero} 2222 XML DETECT_AMD"
             )
         else:
             # Sin AMD: transfer directo al IVR
