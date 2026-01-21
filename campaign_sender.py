@@ -463,16 +463,24 @@ async def main():
         pass
     
     try:
-        # Tareas a ejecutar
+        # Iniciar Check Queue primero si está disponible
+        check_queue_task = None
+        if CHECK_QUEUE_AVAILABLE:
+            logger.info("🚀 Iniciando Check Queue (Monitor de Colas Asterisk)...")
+            check_queue_task = asyncio.create_task(run_queue_monitor())
+            # Esperar a que el servidor WebSocket esté listo
+            await asyncio.sleep(2)
+            logger.info("✅ Check Queue iniciado - Servidor de colas listo")
+        
+        # Tareas principales
         tasks = [
             campaign_monitor(),
             stats_broadcaster()
         ]
         
-        # Agregar monitor de colas de Asterisk si está disponible
-        if CHECK_QUEUE_AVAILABLE:
-            logger.info("🚀 Iniciando Check Queue (Monitor de Colas Asterisk)...")
-            tasks.append(run_queue_monitor())
+        # Agregar check_queue a las tareas si se inició
+        if check_queue_task:
+            tasks.append(check_queue_task)
         
         # Iniciar monitor, broadcaster y check_queue
         await asyncio.gather(*tasks)

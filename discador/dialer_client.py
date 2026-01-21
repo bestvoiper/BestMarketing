@@ -61,26 +61,35 @@ class DialerClient:
         self.dial_rate = 0
         self.dial_recommendation = "stop"
     
-    async def connect(self) -> bool:
-        """Conecta al servidor WebSocket"""
-        try:
-            logger.info(f"🔌 Conectando a {self.ws_url}...")
-            self.ws = await websockets.connect(
-                self.ws_url,
-                ping_interval=20,
-                ping_timeout=20,
-                close_timeout=10
-            )
-            self.connected = True
-            logger.info("✅ Conectado al servidor de colas")
-            
-            # Iniciar listener de mensajes en background
-            self.message_listener_task = asyncio.create_task(self._message_listener())
-            
-            return True
-        except Exception as e:
-            logger.error(f"❌ Error conectando: {e}")
-            return False
+    async def connect(self, max_retries: int = 5, retry_delay: float = 1.0) -> bool:
+        """Conecta al servidor WebSocket con reintentos"""
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.info(f"🔌 Conectando a {self.ws_url}... (intento {attempt}/{max_retries})")
+                self.ws = await websockets.connect(
+                    self.ws_url,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    close_timeout=10
+                )
+                self.connected = True
+                logger.info("✅ Conectado al servidor de colas")
+                
+                # Iniciar listener de mensajes en background
+                self.message_listener_task = asyncio.create_task(self._message_listener())
+                
+                return True
+            except ConnectionRefusedError as e:
+                if attempt < max_retries:
+                    logger.warning(f"⏳ Servidor no disponible, reintentando en {retry_delay}s...")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 1.5, 5.0)  # Backoff exponencial, máx 5s
+                else:
+                    logger.error(f"❌ Error conectando después de {max_retries} intentos: {e}")
+            except Exception as e:
+                logger.error(f"❌ Error conectando: {e}")
+                return False
+        return False
     
     async def _message_listener(self):
         """Listener de mensajes en background"""
