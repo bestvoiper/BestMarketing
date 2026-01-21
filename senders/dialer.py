@@ -53,7 +53,7 @@ logger = get_logger("dialer_sender")
 # Configuración WebSocket para DialerClient
 # Si check_queue.py corre en el mismo servidor, usar localhost
 # Si corre en otro servidor, cambiar a la IP correspondiente
-DIALER_WS_URL = "ws://127.0.0.1:8766"
+DIALER_WS_URL = "ws://127.0.0.1:8767"  # Puerto 8767 (check_queue.py)
 
 # Mapeo Hangup-Cause a estados Discador
 HANGUP_CAUSE_TO_DIALER_STATE = {

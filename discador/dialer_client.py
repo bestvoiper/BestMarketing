@@ -400,8 +400,8 @@ class DialerClient:
 async def main():
     parser = argparse.ArgumentParser(description="Cliente Dialer - Monitor de Colas")
     parser.add_argument("-q", "--queue", required=True, help="Nombre de la cola a monitorear")
-    parser.add_argument("-u", "--ws-url", default="ws://tvnovedades.bestvoiper.com:8766", 
-                        help="URL del servidor WebSocket (default: ws://tvnovedades.bestvoiper.com:8766)")
+    parser.add_argument("-u", "--ws-url", default="ws://proyectofsluis.bestvoiper.com:8766", 
+                        help="URL del servidor WebSocket (default: ws://proyectofsluis.bestvoiper.com:8766)")
     parser.add_argument("-i", "--interval", type=float, default=3.0,
                         help="Intervalo de consulta en segundos (default: 3)")
     parser.add_argument("--max-ratio", type=int, default=3,

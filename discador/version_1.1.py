@@ -52,7 +52,7 @@ AMI_SECRET = "pbx1910jgm"
 
 # Configuración WebSocket
 WS_HOST = "0.0.0.0"
-WS_PORT = 8766
+WS_PORT = 8767  # Puerto 8767 para evitar conflicto con websocket_server (8765/8766)
 WS_SSL_CERT = None  # Ruta al certificado SSL para WSS
 WS_SSL_KEY = None   # Ruta a la llave privada SSL
 

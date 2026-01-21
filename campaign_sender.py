@@ -51,6 +51,15 @@ except ImportError:
     async def send_stats_to_websocket(*args, **kwargs): pass
     async def send_event_to_websocket(*args, **kwargs): pass
 
+# Check Queue (Monitor de colas de Asterisk)
+CHECK_QUEUE_AVAILABLE = False
+try:
+    from discador.check_queue import run_websocket_server as run_queue_monitor
+    CHECK_QUEUE_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"⚠️ check_queue no disponible: {e}")
+    async def run_queue_monitor(*args, **kwargs): pass
+
 # Control global
 RUNNING = True
 ACTIVE_CAMPAIGNS: Dict[str, BaseSender] = {}
@@ -364,6 +373,7 @@ async def campaign_monitor():
             
         except Exception as e:
             logger.error(f"❌ Error en monitor: {e}")
+            logger.error(traceback.format_exc())
             await asyncio.sleep(5)
 
 
@@ -429,6 +439,11 @@ async def main():
     else:
         logger.info("⚠️ WebSocket: No disponible")
     
+    if CHECK_QUEUE_AVAILABLE:
+        logger.info("✅ Check Queue (Monitor Asterisk): Disponible")
+    else:
+        logger.info("⚠️ Check Queue (Monitor Asterisk): No disponible")
+    
     logger.info("")
     logger.info("🎯 Sistema listo - Monitoreando campañas...")
     logger.info("💡 Presiona Ctrl+C para detener")
@@ -448,11 +463,19 @@ async def main():
         pass
     
     try:
-        # Iniciar monitor y broadcaster
-        await asyncio.gather(
+        # Tareas a ejecutar
+        tasks = [
             campaign_monitor(),
             stats_broadcaster()
-        )
+        ]
+        
+        # Agregar monitor de colas de Asterisk si está disponible
+        if CHECK_QUEUE_AVAILABLE:
+            logger.info("🚀 Iniciando Check Queue (Monitor de Colas Asterisk)...")
+            tasks.append(run_queue_monitor())
+        
+        # Iniciar monitor, broadcaster y check_queue
+        await asyncio.gather(*tasks)
     except KeyboardInterrupt:
         await shutdown()
 

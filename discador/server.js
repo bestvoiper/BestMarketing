@@ -4,7 +4,7 @@ const path = require('path');
 const WebSocket = require('ws');
 
 const PORT = 3000;
-const WS_TARGET = 'ws://tvnovedades.bestvoiper.com:8766';
+const WS_TARGET = 'ws://proyectofsluis.bestvoiper.com:8766';
 
 // Colores para la consola
 const colors = {
