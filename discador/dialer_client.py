@@ -79,15 +79,17 @@ class DialerClient:
                 self.message_listener_task = asyncio.create_task(self._message_listener())
                 
                 return True
-            except ConnectionRefusedError as e:
+            except (ConnectionRefusedError, OSError) as e:
+                # OSError incluye [Errno 111] Connect call failed
                 if attempt < max_retries:
-                    logger.warning(f"⏳ Servidor no disponible, reintentando en {retry_delay}s...")
+                    logger.warning(f"⏳ Servidor no disponible (intento {attempt}/{max_retries}), reintentando en {retry_delay}s...")
                     await asyncio.sleep(retry_delay)
                     retry_delay = min(retry_delay * 1.5, 5.0)  # Backoff exponencial, máx 5s
                 else:
                     logger.error(f"❌ Error conectando después de {max_retries} intentos: {e}")
+                    return False
             except Exception as e:
-                logger.error(f"❌ Error conectando: {e}")
+                logger.error(f"❌ Error inesperado conectando: {e}")
                 return False
         return False
     
@@ -99,21 +101,25 @@ class DialerClient:
                     data = json.loads(message)
                     msg_type = data.get("type", "")
                     
-                    # Si hay alguien esperando este tipo de mensaje
-                    if msg_type in self.pending_responses:
+                    # Solo procesar respuestas (mensajes con "data")
+                    # Ignorar requests que no tienen data
+                    has_data = "data" in data
+                    
+                    # Si hay alguien esperando este tipo de mensaje Y tiene data (es una respuesta)
+                    if msg_type in self.pending_responses and has_data:
                         await self.pending_responses[msg_type].put(data)
                     
-                    # Procesar según tipo
+                    # Procesar según tipo (solo respuestas con data)
                     if msg_type == "initial_data":
                         logger.info(f"📊 Datos iniciales recibidos: {data.get('data', {}).get('total_queues', 0)} colas")
                         self.last_queue_update = data.get("data", {})
                     
-                    elif msg_type == "queue_update":
+                    elif msg_type == "queue_update" and has_data:
                         self.last_queue_update = data.get("data", {})
                         if self.on_queue_update:
                             self.on_queue_update(self.last_queue_update)
                     
-                    elif msg_type == "dialer_status":
+                    elif msg_type == "dialer_status" and has_data:
                         self.last_status = data.get("data", {})
                         self._process_status(self.last_status)
                     
@@ -132,10 +138,13 @@ class DialerClient:
                     logger.error(f"❌ Error procesando mensaje: {e}")
                     
         except websockets.exceptions.ConnectionClosed as e:
-            logger.warning(f"🔌 Conexión cerrada: {e}")
+            logger.debug(f"🔌 Conexión WebSocket cerrada: {e.code} {e.reason}")
+            self.connected = False
+        except asyncio.CancelledError:
+            # Task cancelada normalmente durante shutdown
             self.connected = False
         except Exception as e:
-            logger.error(f"❌ Error en listener: {e}")
+            logger.error(f"❌ Error en listener: {type(e).__name__}: {e}")
             self.connected = False
     
     async def disconnect(self):

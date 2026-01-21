@@ -1656,44 +1656,29 @@ class QueueWebSocketServer:
             dial_reason = f"Sistema saturado: {calls_waiting} llamadas en espera sin agentes disponibles"
             dial_recommendation = "pause"
         
-        # A partir de aquí, SÍ puede marcar pero con diferentes velocidades
-        
-        # SLOW: Muchas llamadas en espera pero hay agentes - reducir velocidad
+        # SLOW: Muchas llamadas en espera - reducir velocidad
         elif calls_waiting >= dialer_config["max_wait_calls"]:
             can_dial = True
-            dial_reason = f"Llamadas en espera ({calls_waiting}) pero hay {available_agents} agentes atendiendo"
+            dial_reason = f"Muchas llamadas en espera ({calls_waiting}) - reducir velocidad"
             dial_recommendation = "slow"
         
-        # SLOW: Tasa de abandono alta - reducir velocidad pero seguir marcando
+        # SLOW: Tasa de abandono alta - reducir velocidad
         elif abandon_rate >= dialer_config["pause_on_abandon_rate"]:
             can_dial = True
             dial_reason = f"Tasa de abandono alta ({abandon_rate:.1f}%) - reducir velocidad"
             dial_recommendation = "slow"
         
-        # SLOW: Solo 1 agente con varias llamadas en espera
+        # SLOW: Solo 1 agente con llamadas en espera
         elif available_agents == 1 and calls_waiting >= 2:
             can_dial = True
             dial_reason = f"1 agente con {calls_waiting} llamadas en espera - reducir velocidad"
             dial_recommendation = "slow"
         
-        # ACCELERATE: Buenos recursos disponibles
-        elif available_agents >= 3 and calls_waiting == 0:
-            can_dial = True
-            dial_reason = f"Excelente capacidad: {available_agents} agentes libres, sin espera"
-            dial_recommendation = "accelerate"
-        
         # PROCEED: Condiciones normales
-
-        elif available_agents >= 3 and calls_waiting == 0:
-            dial_recommendation = "accelerate"
-            dial_reason = f"Buena capacidad ({available_agents} agentes libres, sin espera)"
-
         else:
             can_dial = True
-            dial_reason = f"OK - {available_agents} agentes, {calls_waiting} en espera"
+            dial_reason = f"OK - {available_agents} agentes disponibles, {calls_waiting} en espera"
             dial_recommendation = "proceed"
-            dial_recommendation = "slow"
-            dial_reason = "Solo 1 agente disponible con llamadas en espera - reducir velocidad"
         
         # Calcular velocidad sugerida (llamadas por minuto)
         if dial_recommendation == "stop":
@@ -1702,8 +1687,6 @@ class QueueWebSocketServer:
             suggested_rate = 0
         elif dial_recommendation == "slow":
             suggested_rate = max(1, available_agents)
-        elif dial_recommendation == "accelerate":
-            suggested_rate = available_agents * 2
         else:  # proceed
             suggested_rate = available_agents * dialer_config["max_ratio"]
         

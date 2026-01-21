@@ -402,6 +402,22 @@ class DialerSender(BaseSender):
         self.available_agents = 0
         return {"total": 0, "available": 0, "busy": 0, "source": "no_ami"}
     
+    async def _count_active_calls(self) -> int:
+        """
+        Cuenta las llamadas activas actuales de esta campaña.
+        Estados activos: P (Procesando), R (Ringing), A (Answered/En cola), Q (En cola), T (Transfer)
+        """
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(text(f"""
+                    SELECT COUNT(*) FROM `{self.campaign_name}`
+                    WHERE estado IN ('P', 'R', 'A', 'Q', 'T', 'enviando')
+                """)).scalar()
+                return result or 0
+        except Exception as e:
+            self.logger.warning(f"⚠️ Error contando llamadas activas: {e}")
+            return 0
+    
     def calculate_abandon_rate(self) -> float:
         """Calcula tasa de abandono"""
         total = self.answered_count + self.abandon_count
@@ -518,24 +534,28 @@ class DialerSender(BaseSender):
     
     async def send_batch(self, items: list) -> list:
         """
-        Envía lote con lógica inteligente de marcado.
+        Envía lote con lógica inteligente de marcado CONTROLADO.
         
-        Si DialerClient está conectado:
-        - Respeta can_dial (no marca si es False)
-        - Ajusta batch_size según dial_capacity
-        - Usa suggested_rate para el timing
-        - Considera overdial_extra_calls
-        
-        Si no, usa lógica tradicional de overdial.
+        Reglas principales:
+        1. Máximo X llamadas activas por agente (ratio)
+        2. No marcar más si ya alcanzó el límite
+        3. Esperar a que terminen llamadas antes de marcar más
+        4. Respetar can_dial y recomendaciones del servidor
         """
-        # Obtener estado actual de agentes
         self.logger.info(f"📋 send_batch() llamado con {len(items)} items")
+        
+        # Obtener estado actual de agentes
         agent_info = await self.get_available_agents()
         self.logger.info(f"📊 Resultado agentes: {agent_info}")
+        
+        # Contar llamadas activas actuales en la BD
+        active_calls = await self._count_active_calls()
+        self.logger.info(f"📞 Llamadas activas actuales: {active_calls}")
         
         # === MODO INTELIGENTE ===
         if self.use_intelligent_dialing and self.last_queue_status:
             self.logger.info("🧠 Usando MODO INTELIGENTE (DialerClient conectado)")
+            
             # Verificar si podemos marcar
             if not self.can_dial:
                 self.logger.warning(f"⏸️ Marcado pausado: {self.dial_recommendation}")
@@ -549,35 +569,52 @@ class DialerSender(BaseSender):
             
             if self.dial_recommendation == "pause":
                 self.logger.info("⏸️ Recomendación: PAUSE - Esperando...")
-                await asyncio.sleep(5)  # Esperar antes de reintentar
+                await asyncio.sleep(5)
                 return []
             
-            # Calcular batch_size inteligente
-            batch_size = self.dial_capacity
+            # Calcular capacidad máxima basada en agentes y ratio
+            max_ratio = 2  # Máximo 2 llamadas por agente por defecto
+            config = self.last_queue_status.get("config", {})
+            max_ratio = config.get("max_ratio", 2)
             
-            # Agregar llamadas extra de sobrediscado si aplica
-            if self.overdial_extra_calls > 0:
-                batch_size += self.overdial_extra_calls
-                self.logger.debug(f"📈 Sobrediscado: +{self.overdial_extra_calls} llamadas")
+            # Capacidad máxima = agentes disponibles × ratio
+            max_capacity = self.available_agents * max_ratio
+            
+            # Cuántas más podemos marcar = capacidad - activas
+            can_dial_count = max(0, max_capacity - active_calls)
+            
+            self.logger.info(
+                f"📊 Capacidad: {self.available_agents} agentes × {max_ratio} ratio = {max_capacity} máx"
+            )
+            self.logger.info(
+                f"📊 Llamadas: {active_calls} activas, puedo marcar {can_dial_count} más"
+            )
+            
+            # Si no hay espacio, no marcar
+            if can_dial_count <= 0:
+                self.logger.info("⏳ Sin capacidad - esperando a que terminen llamadas...")
+                return []
             
             # Ajustar según recomendación
             if self.dial_recommendation == "slow":
-                batch_size = max(1, batch_size // 2)
-                self.logger.debug(f"🐢 Modo lento: batch reducido a {batch_size}")
-            elif self.dial_recommendation == "accelerate":
-                batch_size = int(batch_size * 1.5)
-                self.logger.debug(f"🚀 Acelerando: batch aumentado a {batch_size}")
+                can_dial_count = max(1, can_dial_count // 2)
+                self.logger.info(f"🐢 Modo lento: reducido a {can_dial_count}")
             
-            # Limitar al máximo configurado
-            batch_size = min(batch_size, len(items), self.max_concurrent)
+            # Limitar al máximo de canales configurado
+            if self.max_channels > 0:
+                available_channels = max(0, self.max_channels - active_calls)
+                can_dial_count = min(can_dial_count, available_channels)
+                self.logger.info(f"📡 Canales disponibles: {available_channels}")
+            
+            batch_size = min(can_dial_count, len(items))
             
             if batch_size <= 0:
                 self.logger.info("📋 Sin capacidad de marcado disponible")
                 return []
             
             self.logger.info(
-                f"🎯 Marcado inteligente: {batch_size} llamadas "
-                f"(cap: {self.dial_capacity}, rec: {self.dial_recommendation})"
+                f"🎯 Marcando: {batch_size} llamadas "
+                f"(agentes: {self.available_agents}, activas: {active_calls})"
             )
         
         # === MODO TRADICIONAL ===
@@ -587,21 +624,31 @@ class DialerSender(BaseSender):
             
             if self.available_agents < DIALER_MIN_AGENTS:
                 self.logger.warning(f"🚫 BLOQUEADO: Solo {self.available_agents} agentes (mínimo: {DIALER_MIN_AGENTS})")
-                self.logger.warning(f"⏳ No se enviarán llamadas hasta tener agentes suficientes")
                 return []
             
             # Ajustar overdial tradicional
             self.adjust_overdial()
             
-            # Calcular batch size según agentes y overdial
-            batch_size = int(self.available_agents * self.overdial_ratio)
-            self.logger.debug(f"📐 Cálculo: {self.available_agents} agentes × {self.overdial_ratio} ratio = {batch_size}")
-            batch_size = min(batch_size, len(items), self.cps)
-            self.logger.debug(f"📐 Ajustado a min({batch_size}, {len(items)} items, {self.cps} cps) = {batch_size}")
+            # Capacidad máxima = agentes × ratio
+            max_capacity = int(self.available_agents * self.overdial_ratio)
+            can_dial_count = max(0, max_capacity - active_calls)
+            
+            self.logger.info(
+                f"📊 Capacidad: {self.available_agents} agentes × {self.overdial_ratio} ratio = {max_capacity}"
+            )
+            self.logger.info(
+                f"📊 Llamadas: {active_calls} activas, puedo marcar {can_dial_count} más"
+            )
+            
+            if can_dial_count <= 0:
+                self.logger.info("⏳ Sin capacidad - esperando a que terminen llamadas...")
+                return []
+            
+            batch_size = min(can_dial_count, len(items), self.cps)
             
             self.logger.info(
                 f"📞 Marcado tradicional: {batch_size} llamadas "
-                f"(agentes: {self.available_agents}, ratio: {self.overdial_ratio})"
+                f"(activas: {active_calls}, max: {max_capacity})"
             )
         
         actual_batch = items[:batch_size]

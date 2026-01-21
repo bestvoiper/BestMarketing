@@ -468,9 +468,11 @@ async def main():
         if CHECK_QUEUE_AVAILABLE:
             logger.info("🚀 Iniciando Check Queue (Monitor de Colas Asterisk)...")
             check_queue_task = asyncio.create_task(run_queue_monitor())
-            # Esperar a que el servidor WebSocket esté listo
-            await asyncio.sleep(2)
-            logger.info("✅ Check Queue iniciado - Servidor de colas listo")
+            # Dar tiempo al event loop para que inicie el servidor WebSocket
+            # Múltiples yields cortos para asegurar que check_queue progrese
+            for i in range(5):
+                await asyncio.sleep(0.5)
+            logger.info("✅ Check Queue iniciado - Servidor de colas listo en puerto 8767")
         
         # Tareas principales
         tasks = [

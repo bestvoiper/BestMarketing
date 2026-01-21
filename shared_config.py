@@ -150,7 +150,7 @@ DIALER_TERMINAL_STATES = ('C', 'N', 'O', 'F', 'M', 'B', 'X', 'E')
 
 # Logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
@@ -158,7 +158,7 @@ logging.basicConfig(
 def get_logger(name):
     """Obtiene un logger configurado"""
     logger = logging.getLogger(name)
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
     return logger
 
 def create_db_engine(pool_size=100, max_overflow=50):
