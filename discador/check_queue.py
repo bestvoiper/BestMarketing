@@ -1184,14 +1184,15 @@ class DynamicPortManager:
     
     def calculate_ports_needed(self, logged_agents: int) -> int:
         """Calcula cuántos puertos se necesitan basándose en agentes logueados"""
+        # Si no hay agentes conectados, no necesitamos puertos dinámicos
         if logged_agents <= 0:
-            return self.min_ports
+            return 0
         
         # 1 puerto por cada AGENTS_PER_PORT agentes, redondeando hacia arriba
         ports_needed = (logged_agents + self.agents_per_port - 1) // self.agents_per_port
         
-        # Aplicar límites
-        ports_needed = max(self.min_ports, min(ports_needed, self.max_ports))
+        # Aplicar límite máximo (mínimo ya no aplica si hay 0 agentes)
+        ports_needed = min(ports_needed, self.max_ports)
         
         return ports_needed
     
@@ -1450,9 +1451,14 @@ class DynamicPortManager:
     def is_ready(self) -> bool:
         """
         Verifica si el sistema de puertos dinámicos está listo para recibir llamadas.
-        Retorna True si hay al menos el mínimo de puertos activos.
+        Retorna True si hay agentes conectados Y puertos activos.
         """
-        return len(self.active_servers) >= self.min_ports
+        # Si no hay agentes, no estamos listos (aunque técnicamente está bien)
+        if self.current_logged_agents <= 0:
+            return False
+        # Si hay agentes, verificar que tengamos los puertos necesarios
+        ports_needed = self.calculate_ports_needed(self.current_logged_agents)
+        return len(self.active_servers) >= ports_needed
     
     def can_dial(self) -> Tuple[bool, str]:
         """
@@ -1464,16 +1470,18 @@ class DynamicPortManager:
         
         active_count = len(self.active_servers)
         
-        if active_count == 0:
-            return False, "❌ NO HAY PUERTOS ACTIVOS - No iniciar llamadas"
+        # Si no hay agentes conectados, no se puede marcar
+        if self.current_logged_agents <= 0:
+            return False, "❌ NO HAY AGENTES CONECTADOS - No iniciar llamadas (0 puertos activos)"
         
-        if active_count < self.min_ports:
-            return False, f"⚠️ Puertos insuficientes: {active_count}/{self.min_ports} mínimo requerido"
-        
-        # Verificar si hay puertos suficientes para los agentes actuales
+        # Calcular puertos necesarios para los agentes actuales
         ports_needed = self.calculate_ports_needed(self.current_logged_agents)
+        
+        if active_count == 0:
+            return False, f"❌ NO HAY PUERTOS ACTIVOS - Esperando {ports_needed} puertos para {self.current_logged_agents} agentes"
+        
         if active_count < ports_needed:
-            return True, f"⚠️ Puertos limitados: {active_count}/{ports_needed} (se ajustará automáticamente)"
+            return False, f"⚠️ Puertos insuficientes: {active_count}/{ports_needed} (iniciando más puertos...)"
         
         return True, f"✅ Puertos OK: {active_count} activos para {self.current_logged_agents} agentes"
 
