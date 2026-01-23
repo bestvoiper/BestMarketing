@@ -11,7 +11,7 @@ import signal
 import gc
 
 # Configuración
-LISTEN_PORT = 8080
+LISTEN_PORT = 8082
 VOSK_PORTS = list(range(8101, 8201))  # 100 puertos
 MAX_CONNECTIONS_PER_PORT = 100
 HEALTH_CHECK_INTERVAL = 30
