@@ -77,6 +77,7 @@ MIN_DYNAMIC_PORTS = 1  # Mínimo puertos activos (aunque no haya agentes)
 VOSK_ENABLED = True  # Habilitar inicio automático de VOSK en cada puerto
 VOSK_SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "..", "AMD_PRO", "vosk_cli_args.py")
 VOSK_WORKING_DIR = os.path.join(os.path.dirname(__file__), "..", "AMD_PRO")
+VOSK_MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "AMD_PRO", "vosk-model-small-es-0.42")
 VOSK_STARTUP_DELAY = 0.5  # Segundos de espera después de iniciar VOSK
 
 # Configuración Redis (para persistencia de métricas)
@@ -1220,8 +1221,15 @@ class DynamicPortManager:
         try:
             vosk_path = os.path.abspath(VOSK_SCRIPT_PATH)
             working_dir = os.path.abspath(VOSK_WORKING_DIR)
+            model_path = os.path.abspath(VOSK_MODEL_PATH)
             
-            cmd = ["python3", vosk_path, "--port", str(port)]
+            # Verificar que el modelo existe
+            if not os.path.exists(model_path):
+                logger.error(f"❌ [VOSK] Modelo no encontrado en: {model_path}")
+                logger.error(f"   Descarga el modelo de: https://alphacephei.com/vosk/models")
+                return False
+            
+            cmd = ["python3", vosk_path, "--port", str(port), "--model-path", model_path]
             
             env = os.environ.copy()
             env["ERALYWS_NAME"] = f"vosk_dynamic_{port}"
@@ -1230,6 +1238,7 @@ class DynamicPortManager:
             logger.info(f"🎧 [VOSK] Iniciando proceso para puerto {port}...")
             logger.debug(f"   Comando: {' '.join(cmd)}")
             logger.debug(f"   Working dir: {working_dir}")
+            logger.debug(f"   Modelo: {model_path}")
             
             process = subprocess.Popen(
                 cmd,

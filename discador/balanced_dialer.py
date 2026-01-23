@@ -212,24 +212,36 @@ class DialerLoadBalancer:
                         continue
                     
                     try:
-                        # Test de conexión WebSocket - enviar ping válido
-                        test_ws = await asyncio.wait_for(
-                            websockets.connect(f"ws://127.0.0.1:{port}", close_timeout=2),
+                        # Test de conexión TCP simple - solo verificar que el puerto está escuchando
+                        # No hacemos WebSocket completo porque VOSK requiere parámetros específicos
+                        reader, writer = await asyncio.wait_for(
+                            asyncio.open_connection('127.0.0.1', port),
                             timeout=3
                         )
-                        # Enviar un ping JSON válido antes de cerrar
-                        await test_ws.send('{"type":"ping"}')
-                        await asyncio.sleep(0.1)  # Esperar respuesta brevemente
-                        await test_ws.close()
+                        writer.close()
+                        await writer.wait_closed()
                         
                         if not self.backend_stats[port]['healthy']:
                             logger.info(f"✅ Puerto {port} recuperado")
                         self.backend_stats[port]['healthy'] = True
                         
-                    except Exception as e:
+                    except (ConnectionRefusedError, OSError, asyncio.TimeoutError) as e:
+                        # Estos son errores reales de conexión
                         if self.backend_stats[port]['healthy']:
                             logger.warning(f"❌ Puerto {port} no responde: {e}")
                         self.backend_stats[port]['healthy'] = False
+                    except Exception as e:
+                        # Otros errores - loggear pero no marcar como caído si es código 1000
+                        error_str = str(e)
+                        if "1000" in error_str or "OK" in error_str:
+                            # Cierre normal - el puerto está activo
+                            if not self.backend_stats[port]['healthy']:
+                                logger.info(f"✅ Puerto {port} recuperado")
+                            self.backend_stats[port]['healthy'] = True
+                        else:
+                            if self.backend_stats[port]['healthy']:
+                                logger.warning(f"❌ Puerto {port} error: {e}")
+                            self.backend_stats[port]['healthy'] = False
                     
                     self.backend_stats[port]['last_check'] = current_time
                 
@@ -484,15 +496,18 @@ class DialerLoadBalancer:
             logger.info(
                 f"✅ {client_addr} -> puerto {backend_port} "
                 f"(conn: {self.backend_stats[backend_port]['connections']}, "
-                f"tiempo: {connect_time:.1f}ms)"
+                f"tiempo: {connect_time:.1f}ms, path: {path})"
             )
             
             # Proxy bidireccional
-            await asyncio.gather(
-                self.forward_messages(client_ws, backend_ws, f"{client_addr}->B", conn_id),
-                self.forward_messages(backend_ws, client_ws, f"B->{client_addr}", conn_id),
-                return_exceptions=True
-            )
+            try:
+                await asyncio.gather(
+                    self.forward_messages(client_ws, backend_ws, f"FS->VOSK:{backend_port}", conn_id),
+                    self.forward_messages(backend_ws, client_ws, f"VOSK:{backend_port}->FS", conn_id),
+                    return_exceptions=True
+                )
+            except Exception as e:
+                logger.debug(f"Proxy terminado para {client_addr}: {e}")
             
         except asyncio.TimeoutError:
             logger.warning(f"❌ Timeout conectando a backend {backend_port}")
@@ -530,26 +545,27 @@ class DialerLoadBalancer:
                 )
     
     async def forward_messages(self, source, destination, direction, conn_id):
-        """Reenviar mensajes entre WebSockets"""
+        """Reenviar mensajes entre WebSockets (texto y binario)"""
         try:
             async for message in source:
                 if conn_id not in self.active_connections:
+                    logger.debug(f"[{direction}] Conexión no encontrada, terminando")
                     break
                 if destination.closed:
+                    logger.debug(f"[{direction}] Destino cerrado, terminando")
                     break
+                    
+                # Reenviar mensaje (texto o binario)
                 await destination.send(message)
-        except websockets.exceptions.ConnectionClosed:
-            pass
+                
+        except websockets.exceptions.ConnectionClosedOK:
+            # Cierre normal (código 1000)
+            logger.debug(f"[{direction}] Cierre normal")
+        except websockets.exceptions.ConnectionClosedError as e:
+            # Cierre con error
+            logger.debug(f"[{direction}] Cierre con error: {e.code} {e.reason}")
         except Exception as e:
-            logger.debug(f"Error forwarding {direction}: {e}")
-        finally:
-            try:
-                if not source.closed:
-                    await source.close()
-                if not destination.closed:
-                    await destination.close()
-            except:
-                pass
+            logger.warning(f"[{direction}] Error forwarding: {type(e).__name__}: {e}")
 
 
 # Instancia global
