@@ -12,6 +12,7 @@ import pickle
 import os
 import subprocess
 import signal
+import time
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Set, Tuple, Any
@@ -79,6 +80,7 @@ VOSK_SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "..", "AMD_PRO", "vos
 VOSK_WORKING_DIR = os.path.join(os.path.dirname(__file__), "..", "AMD_PRO")
 VOSK_MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "AMD_PRO", "vosk-model-small-es-0.42")
 VOSK_STARTUP_DELAY = 0.5  # Segundos de espera después de iniciar VOSK
+VOSK_SHUTDOWN_GRACE_PERIOD = 60  # Segundos de gracia antes de cerrar un puerto (permitir que llamadas activas terminen)
 
 # Configuración Redis (para persistencia de métricas)
 REDIS_HOST = "localhost"
@@ -1169,6 +1171,9 @@ class DynamicPortManager:
         # Procesos VOSK activos: {puerto: subprocess.Popen}
         self.vosk_processes: Dict[int, subprocess.Popen] = {}
         
+        # Puertos pendientes de cierre: {puerto: timestamp_marcado_para_cierre}
+        self.ports_pending_close: Dict[int, float] = {}
+        
         # Estado de agentes
         self.current_logged_agents = 0
         self.current_ports_needed = min_ports
@@ -1250,7 +1255,6 @@ class DynamicPortManager:
             )
             
             # Esperar un poco para verificar que inició correctamente
-            import time
             time.sleep(VOSK_STARTUP_DELAY)
             
             if process.poll() is None:  # Proceso sigue corriendo
@@ -1583,12 +1587,16 @@ class DynamicPortManager:
         """
         Actualiza el número de agentes y ajusta los puertos dinámicamente.
         Llamar esto cada vez que cambie el número de agentes logueados.
+        
+        Los puertos NO se cierran inmediatamente - se usa un grace period para
+        permitir que las llamadas activas (AMD en progreso) terminen.
         """
         prev_agents = self.current_logged_agents
         self.current_logged_agents = logged_agents
         ports_needed = self.calculate_ports_needed(logged_agents)
         
         current_ports = len(self.active_servers)
+        current_time = time.time()
         
         # Log cuando cambia el número de agentes (solo si es significativo)
         if prev_agents != logged_agents and (prev_agents == 0 or logged_agents == 0 or 
@@ -1596,23 +1604,52 @@ class DynamicPortManager:
             logger.info(f"👥 Agentes conectados: {prev_agents} → {logged_agents} "
                         f"(puertos necesarios: {ports_needed})")
         
-        if ports_needed == current_ports:
-            return  # No hay cambios necesarios
+        # Primero: Procesar puertos pendientes de cierre que ya pasaron el grace period
+        ports_to_actually_close = []
+        for port, marked_time in list(self.ports_pending_close.items()):
+            if current_time - marked_time >= VOSK_SHUTDOWN_GRACE_PERIOD:
+                # Ya pasó el grace period, cerrar el puerto
+                ports_to_actually_close.append(port)
+            elif port in self.active_servers and ports_needed > 0:
+                # Si ahora necesitamos más puertos, quitar de la lista de pendientes
+                del self.ports_pending_close[port]
+                logger.info(f"♻️ Puerto {port} recuperado (ya no se cerrará)")
         
-        logger.info(f"📊 Ajustando puertos: {current_ports} → {ports_needed} "
-                    f"(agentes conectados: {logged_agents})")
+        # Cerrar los que ya pasaron el grace period
+        for port in ports_to_actually_close:
+            if port in self.ports_pending_close:
+                del self.ports_pending_close[port]
+            if port in self.active_servers:
+                logger.info(f"⏰ Grace period terminado para puerto {port} - cerrando")
+                await self.stop_port(port)
+        
+        # Recalcular puertos activos después de los cierres
+        current_ports = len(self.active_servers)
+        
+        if ports_needed == current_ports:
+            self.current_ports_needed = ports_needed
+            return  # No hay cambios necesarios
         
         if ports_needed > current_ports:
             # Necesitamos más puertos
+            logger.info(f"📊 Necesitamos más puertos: {current_ports} → {ports_needed} "
+                        f"(agentes: {logged_agents})")
             for i in range(current_ports, ports_needed):
                 port = self.base_port + i
-                await self.start_port(port)
+                # Si estaba pendiente de cierre, quitarlo de la lista
+                if port in self.ports_pending_close:
+                    del self.ports_pending_close[port]
+                    logger.info(f"♻️ Puerto {port} recuperado de lista de cierre")
+                if port not in self.active_servers:
+                    await self.start_port(port)
         
         elif ports_needed < current_ports:
-            # Sobran puertos - cerrar los de número más alto
-            ports_to_close = sorted(self.active_servers.keys(), reverse=True)[:current_ports - ports_needed]
-            for port in ports_to_close:
-                await self.stop_port(port)
+            # Sobran puertos - MARCAR para cierre con grace period (no cerrar inmediatamente)
+            ports_to_mark = sorted(self.active_servers.keys(), reverse=True)[:current_ports - ports_needed]
+            for port in ports_to_mark:
+                if port not in self.ports_pending_close:
+                    self.ports_pending_close[port] = current_time
+                    logger.info(f"⏳ Puerto {port} marcado para cierre (grace period: {VOSK_SHUTDOWN_GRACE_PERIOD}s)")
         
         self.current_ports_needed = ports_needed
     
@@ -1654,11 +1691,13 @@ class DynamicPortManager:
             "ports_needed": self.current_ports_needed,
             "active_ports": list(self.active_servers.keys()),
             "total_active_ports": len(self.active_servers),
+            "ports_pending_close": {p: int(time.time() - t) for p, t in self.ports_pending_close.items()},
             "clients_per_port": {p: len(c) for p, c in self.server_clients.items()},
             "total_clients": sum(len(c) for c in self.server_clients.values()),
             "base_port": self.base_port,
             "max_ports": self.max_ports,
             "min_ports": self.min_ports,
+            "grace_period": VOSK_SHUTDOWN_GRACE_PERIOD,
             "vosk_enabled": self.vosk_enabled,
             "vosk_processes": vosk_status,
             "recent_changes": self.port_history[-10:] if self.port_history else []
