@@ -64,6 +64,13 @@ WS_PORT = 8767  # Puerto 8767 para evitar conflicto con websocket_server (8765/8
 WS_SSL_CERT = None  # Ruta al certificado SSL para WSS
 WS_SSL_KEY = None   # Ruta a la llave privada SSL
 
+# Configuración de puertos dinámicos por agentes
+DYNAMIC_PORTS_ENABLED = True  # Habilitar puertos dinámicos
+AGENTS_PER_PORT = 5  # Crear un puerto por cada 5 agentes logueados
+BASE_DYNAMIC_PORT = 8770  # Puerto base para puertos dinámicos (8770, 8771, 8772, etc.)
+MAX_DYNAMIC_PORTS = 20  # Máximo número de puertos dinámicos
+MIN_DYNAMIC_PORTS = 1  # Mínimo puertos activos (aunque no haya agentes)
+
 # Configuración Redis (para persistencia de métricas)
 REDIS_HOST = "localhost"
 REDIS_PORT = 6379
@@ -1122,6 +1129,348 @@ class QueueAnalytics:
         }
 
 
+class DynamicPortManager:
+    """
+    Gestor de puertos dinámicos para el discador.
+    Crea/destruye servidores WebSocket basándose en la cantidad de agentes logueados.
+    Regla: 1 puerto por cada AGENTS_PER_PORT agentes (default: 5 agentes).
+    """
+    
+    def __init__(self, host: str = WS_HOST, base_port: int = BASE_DYNAMIC_PORT,
+                 agents_per_port: int = AGENTS_PER_PORT,
+                 max_ports: int = MAX_DYNAMIC_PORTS,
+                 min_ports: int = MIN_DYNAMIC_PORTS,
+                 ssl_cert: str = None, ssl_key: str = None):
+        self.host = host
+        self.base_port = base_port
+        self.agents_per_port = agents_per_port
+        self.max_ports = max_ports
+        self.min_ports = min_ports
+        self.ssl_cert = ssl_cert
+        self.ssl_key = ssl_key
+        
+        # Servidores activos: {puerto: servidor_websocket}
+        self.active_servers: Dict[int, Any] = {}
+        self.server_clients: Dict[int, Set] = {}  # Clientes por puerto
+        self.server_tasks: Dict[int, asyncio.Task] = {}  # Tasks por puerto
+        
+        # Estado de agentes
+        self.current_logged_agents = 0
+        self.current_ports_needed = min_ports
+        
+        # Datos compartidos (referencia al servidor principal)
+        self.shared_last_data: Dict = {}
+        self.shared_analytics: Optional[QueueAnalytics] = None
+        
+        # Lock para operaciones thread-safe
+        self._lock = asyncio.Lock()
+        
+        # Historial de cambios
+        self.port_history: List[Dict] = []
+        
+        logger.info(f"📡 DynamicPortManager inicializado: {agents_per_port} agentes/puerto, "
+                    f"rango {base_port}-{base_port + max_ports - 1}")
+    
+    def _create_ssl_context(self) -> Optional[ssl.SSLContext]:
+        """Crea contexto SSL si hay certificados configurados"""
+        if self.ssl_cert and self.ssl_key:
+            try:
+                ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                ssl_context.load_cert_chain(self.ssl_cert, self.ssl_key)
+                return ssl_context
+            except Exception as e:
+                logger.error(f"Error cargando certificados SSL: {e}")
+        return None
+    
+    def calculate_ports_needed(self, logged_agents: int) -> int:
+        """Calcula cuántos puertos se necesitan basándose en agentes logueados"""
+        if logged_agents <= 0:
+            return self.min_ports
+        
+        # 1 puerto por cada AGENTS_PER_PORT agentes, redondeando hacia arriba
+        ports_needed = (logged_agents + self.agents_per_port - 1) // self.agents_per_port
+        
+        # Aplicar límites
+        ports_needed = max(self.min_ports, min(ports_needed, self.max_ports))
+        
+        return ports_needed
+    
+    async def _handle_dynamic_client(self, websocket, path: str, port: int):
+        """Maneja conexiones de clientes en puertos dinámicos"""
+        # Registrar cliente
+        if port not in self.server_clients:
+            self.server_clients[port] = set()
+        self.server_clients[port].add(websocket)
+        
+        client_info = f"{websocket.remote_address[0]}:{websocket.remote_address[1]}"
+        logger.info(f"📱 [Puerto {port}] Cliente conectado: {client_info} "
+                    f"(Total en puerto: {len(self.server_clients[port])})")
+        
+        try:
+            # Enviar datos actuales inmediatamente
+            if self.shared_last_data:
+                await websocket.send(json.dumps({
+                    "type": "initial_data",
+                    "data": self.shared_last_data,
+                    "port_info": {
+                        "port": port,
+                        "total_active_ports": len(self.active_servers),
+                        "logged_agents": self.current_logged_agents
+                    }
+                }))
+            
+            # Mantener conexión y procesar mensajes
+            async for message in websocket:
+                try:
+                    data = json.loads(message)
+                    await self._handle_client_message(websocket, data, port)
+                except json.JSONDecodeError:
+                    await websocket.send(json.dumps({
+                        "type": "error",
+                        "message": "Invalid JSON"
+                    }))
+        except websockets.exceptions.ConnectionClosed:
+            pass
+        finally:
+            # Desregistrar cliente
+            if port in self.server_clients:
+                self.server_clients[port].discard(websocket)
+            logger.info(f"📴 [Puerto {port}] Cliente desconectado "
+                        f"(Total en puerto: {len(self.server_clients.get(port, set()))})")
+    
+    async def _handle_client_message(self, websocket, data: Dict, port: int):
+        """Procesa mensajes de clientes en puertos dinámicos"""
+        msg_type = data.get("type", "")
+        
+        if msg_type == "ping":
+            await websocket.send(json.dumps({"type": "pong", "port": port}))
+        
+        elif msg_type == "get_port_info":
+            await websocket.send(json.dumps({
+                "type": "port_info",
+                "data": {
+                    "current_port": port,
+                    "active_ports": list(self.active_servers.keys()),
+                    "total_ports": len(self.active_servers),
+                    "logged_agents": self.current_logged_agents,
+                    "agents_per_port": self.agents_per_port,
+                    "clients_per_port": {p: len(c) for p, c in self.server_clients.items()}
+                }
+            }))
+        
+        elif msg_type == "get_queues":
+            await websocket.send(json.dumps({
+                "type": "queues",
+                "data": self.shared_last_data,
+                "port": port
+            }))
+    
+    async def broadcast_to_all_ports(self, message: Dict):
+        """Envía mensaje a todos los clientes en todos los puertos dinámicos"""
+        message_str = json.dumps(message)
+        
+        for port, clients in self.server_clients.items():
+            disconnected = set()
+            for client in clients:
+                try:
+                    await client.send(message_str)
+                except websockets.exceptions.ConnectionClosed:
+                    disconnected.add(client)
+                except Exception as e:
+                    logger.debug(f"Error enviando a cliente en puerto {port}: {e}")
+                    disconnected.add(client)
+            
+            # Limpiar clientes desconectados
+            for client in disconnected:
+                clients.discard(client)
+    
+    async def start_port(self, port: int) -> bool:
+        """Inicia un servidor WebSocket en el puerto especificado"""
+        async with self._lock:
+            if port in self.active_servers:
+                logger.warning(f"⚠️ Puerto {port} ya está activo")
+                return False
+            
+            try:
+                ssl_context = self._create_ssl_context()
+                
+                # Crear handler específico para este puerto
+                async def handler(websocket, path):
+                    await self._handle_dynamic_client(websocket, path, port)
+                
+                server = await websockets.serve(
+                    handler,
+                    self.host,
+                    port,
+                    ssl=ssl_context,
+                    ping_interval=30,
+                    ping_timeout=10
+                )
+                
+                self.active_servers[port] = server
+                self.server_clients[port] = set()
+                
+                protocol = "wss" if ssl_context else "ws"
+                logger.info(f"🚀 [Dinámico] Puerto {port} iniciado ({protocol}://{self.host}:{port})")
+                
+                # Registrar en historial
+                self.port_history.append({
+                    "action": "start",
+                    "port": port,
+                    "timestamp": datetime.now().isoformat(),
+                    "logged_agents": self.current_logged_agents
+                })
+                
+                return True
+                
+            except Exception as e:
+                logger.error(f"❌ Error iniciando puerto {port}: {e}")
+                return False
+    
+    async def stop_port(self, port: int) -> bool:
+        """Detiene un servidor WebSocket en el puerto especificado"""
+        async with self._lock:
+            if port not in self.active_servers:
+                logger.warning(f"⚠️ Puerto {port} no está activo")
+                return False
+            
+            try:
+                server = self.active_servers[port]
+                
+                # Notificar a clientes antes de cerrar
+                clients = self.server_clients.get(port, set())
+                for client in list(clients):
+                    try:
+                        await client.send(json.dumps({
+                            "type": "port_closing",
+                            "message": f"Puerto {port} se está cerrando. Reconectar a otro puerto.",
+                            "available_ports": [p for p in self.active_servers.keys() if p != port]
+                        }))
+                        await client.close()
+                    except:
+                        pass
+                
+                # Cerrar servidor
+                server.close()
+                await server.wait_closed()
+                
+                del self.active_servers[port]
+                if port in self.server_clients:
+                    del self.server_clients[port]
+                
+                logger.info(f"🛑 [Dinámico] Puerto {port} detenido")
+                
+                # Registrar en historial
+                self.port_history.append({
+                    "action": "stop",
+                    "port": port,
+                    "timestamp": datetime.now().isoformat(),
+                    "logged_agents": self.current_logged_agents
+                })
+                
+                return True
+                
+            except Exception as e:
+                logger.error(f"❌ Error deteniendo puerto {port}: {e}")
+                return False
+    
+    async def update_agents(self, logged_agents: int):
+        """
+        Actualiza el número de agentes y ajusta los puertos dinámicamente.
+        Llamar esto cada vez que cambie el número de agentes logueados.
+        """
+        self.current_logged_agents = logged_agents
+        ports_needed = self.calculate_ports_needed(logged_agents)
+        
+        current_ports = len(self.active_servers)
+        
+        if ports_needed == current_ports:
+            return  # No hay cambios necesarios
+        
+        logger.info(f"📊 Ajustando puertos: {current_ports} → {ports_needed} "
+                    f"(agentes: {logged_agents})")
+        
+        if ports_needed > current_ports:
+            # Necesitamos más puertos
+            for i in range(current_ports, ports_needed):
+                port = self.base_port + i
+                await self.start_port(port)
+        
+        elif ports_needed < current_ports:
+            # Sobran puertos - cerrar los de número más alto
+            ports_to_close = sorted(self.active_servers.keys(), reverse=True)[:current_ports - ports_needed]
+            for port in ports_to_close:
+                await self.stop_port(port)
+        
+        self.current_ports_needed = ports_needed
+    
+    async def initialize(self, min_ports: int = None):
+        """Inicializa los puertos mínimos requeridos"""
+        if min_ports is None:
+            min_ports = self.min_ports
+        
+        logger.info(f"🔧 Inicializando {min_ports} puertos dinámicos...")
+        
+        for i in range(min_ports):
+            port = self.base_port + i
+            await self.start_port(port)
+    
+    async def shutdown(self):
+        """Detiene todos los puertos dinámicos"""
+        logger.info("🛑 Deteniendo todos los puertos dinámicos...")
+        
+        for port in list(self.active_servers.keys()):
+            await self.stop_port(port)
+    
+    def get_status(self) -> Dict:
+        """Retorna el estado actual del gestor de puertos"""
+        return {
+            "enabled": DYNAMIC_PORTS_ENABLED,
+            "ready": self.is_ready(),
+            "agents_per_port": self.agents_per_port,
+            "current_logged_agents": self.current_logged_agents,
+            "ports_needed": self.current_ports_needed,
+            "active_ports": list(self.active_servers.keys()),
+            "total_active_ports": len(self.active_servers),
+            "clients_per_port": {p: len(c) for p, c in self.server_clients.items()},
+            "total_clients": sum(len(c) for c in self.server_clients.values()),
+            "base_port": self.base_port,
+            "max_ports": self.max_ports,
+            "min_ports": self.min_ports,
+            "recent_changes": self.port_history[-10:] if self.port_history else []
+        }
+    
+    def is_ready(self) -> bool:
+        """
+        Verifica si el sistema de puertos dinámicos está listo para recibir llamadas.
+        Retorna True si hay al menos el mínimo de puertos activos.
+        """
+        return len(self.active_servers) >= self.min_ports
+    
+    def can_dial(self) -> Tuple[bool, str]:
+        """
+        Verifica si se puede iniciar llamadas basándose en el estado de los puertos.
+        Retorna (puede_marcar, razón)
+        """
+        if not DYNAMIC_PORTS_ENABLED:
+            return True, "Puertos dinámicos deshabilitados - marcado permitido"
+        
+        active_count = len(self.active_servers)
+        
+        if active_count == 0:
+            return False, "❌ NO HAY PUERTOS ACTIVOS - No iniciar llamadas"
+        
+        if active_count < self.min_ports:
+            return False, f"⚠️ Puertos insuficientes: {active_count}/{self.min_ports} mínimo requerido"
+        
+        # Verificar si hay puertos suficientes para los agentes actuales
+        ports_needed = self.calculate_ports_needed(self.current_logged_agents)
+        if active_count < ports_needed:
+            return True, f"⚠️ Puertos limitados: {active_count}/{ports_needed} (se ajustará automáticamente)"
+        
+        return True, f"✅ Puertos OK: {active_count} activos para {self.current_logged_agents} agentes"
+
+
 class AsteriskAMI:
     """Cliente AMI para Asterisk"""
     
@@ -1364,6 +1713,9 @@ class QueueWebSocketServer:
         self.last_data: Dict = {}
         self.last_hash: str = ""
         
+        # Gestión de puertos dinámicos
+        self.dynamic_port_manager: Optional['DynamicPortManager'] = None
+        
         # Inicializar Redis si está disponible
         if REDIS_AVAILABLE:
             try:
@@ -1535,6 +1887,47 @@ class QueueWebSocketServer:
         
         elif msg_type == "ping":
             await websocket.send(json.dumps({"type": "pong"}))
+        
+        elif msg_type == "get_dynamic_ports":
+            # Obtener información de puertos dinámicos
+            if DYNAMIC_PORTS_ENABLED and self.dynamic_port_manager:
+                await websocket.send(json.dumps({
+                    "type": "dynamic_ports",
+                    "data": self.dynamic_port_manager.get_status()
+                }))
+            else:
+                await websocket.send(json.dumps({
+                    "type": "dynamic_ports",
+                    "data": {
+                        "enabled": False,
+                        "message": "Puertos dinámicos no están habilitados"
+                    }
+                }))
+        
+        elif msg_type == "configure_dynamic_ports":
+            # Configurar parámetros de puertos dinámicos (requiere permisos)
+            if DYNAMIC_PORTS_ENABLED and self.dynamic_port_manager:
+                new_agents_per_port = data.get("agents_per_port")
+                if new_agents_per_port and isinstance(new_agents_per_port, int) and new_agents_per_port > 0:
+                    self.dynamic_port_manager.agents_per_port = new_agents_per_port
+                    # Recalcular puertos necesarios
+                    await self.dynamic_port_manager.update_agents(
+                        self.dynamic_port_manager.current_logged_agents
+                    )
+                    await websocket.send(json.dumps({
+                        "type": "dynamic_ports_configured",
+                        "data": self.dynamic_port_manager.get_status()
+                    }))
+                else:
+                    await websocket.send(json.dumps({
+                        "type": "error",
+                        "message": "agents_per_port debe ser un entero positivo"
+                    }))
+            else:
+                await websocket.send(json.dumps({
+                    "type": "error",
+                    "message": "Puertos dinámicos no están habilitados"
+                }))
     
     def _get_dialer_status(self, queue_name: str) -> Dict:
         """
@@ -1644,8 +2037,26 @@ class QueueWebSocketServer:
         dial_reason = "OK - Capacidad disponible"
         dial_recommendation = "proceed"  # proceed, slow, pause, stop, accelerate
         
+        # CRÍTICO: Verificar si los puertos dinámicos están activos
+        ports_ready = True
+        ports_status = None
+        ports_can_dial_reason = ""
+        
+        if DYNAMIC_PORTS_ENABLED and self.dynamic_port_manager:
+            ports_status = self.dynamic_port_manager.get_status()
+            ports_ready, ports_can_dial_reason = self.dynamic_port_manager.can_dial()
+            
+            if not ports_ready:
+                can_dial = False
+                dial_reason = ports_can_dial_reason
+                dial_recommendation = "stop"
+        
+        # STOP: Puertos dinámicos no están listos
+        if not ports_ready:
+            pass  # Ya se configuró arriba
+        
         # STOP: No hay agentes disponibles - no marcar
-        if available_agents < dialer_config["min_agents"]:
+        elif available_agents < dialer_config["min_agents"]:
             can_dial = False
             dial_reason = f"Sin agentes disponibles ({available_agents} < {dialer_config['min_agents']})"
             dial_recommendation = "stop"
@@ -1793,7 +2204,18 @@ class QueueWebSocketServer:
                 "reason": dial_reason,
                 "recommendation": dial_recommendation,  # proceed, slow, pause, stop, accelerate
                 "dial_capacity": dial_capacity,
-                "suggested_rate_per_min": suggested_rate
+                "suggested_rate_per_min": suggested_rate,
+                "ports_ready": ports_ready
+            },
+            
+            # Estado de puertos dinámicos
+            "dynamic_ports": {
+                "enabled": DYNAMIC_PORTS_ENABLED,
+                "ready": ports_ready,
+                "status": ports_status if ports_status else {
+                    "enabled": False,
+                    "message": "Puertos dinámicos no habilitados"
+                }
             },
             
             # Información de SobreDiscado
@@ -1848,6 +2270,18 @@ class QueueWebSocketServer:
                 # Preparar datos para broadcast
                 queues_data = [q.to_dict() for q in queues]
                 
+                # Calcular total de agentes logueados (no pausados)
+                total_logged_agents = sum(
+                    len([m for m in q.members if not m.paused]) 
+                    for q in queues
+                )
+                
+                # Actualizar puertos dinámicos basándose en agentes logueados
+                if DYNAMIC_PORTS_ENABLED and self.dynamic_port_manager:
+                    await self.dynamic_port_manager.update_agents(total_logged_agents)
+                    # Actualizar datos compartidos para puertos dinámicos
+                    self.dynamic_port_manager.shared_last_data = self.last_data
+                
                 # Obtener analytics si hay datos suficientes
                 analytics_data = None
                 if self.analytics and queues:
@@ -1861,6 +2295,11 @@ class QueueWebSocketServer:
                     except Exception as e:
                         logger.debug(f"Error calculando analytics: {e}")
                 
+                # Información de puertos dinámicos
+                dynamic_ports_info = None
+                if DYNAMIC_PORTS_ENABLED and self.dynamic_port_manager:
+                    dynamic_ports_info = self.dynamic_port_manager.get_status()
+                
                 current_data = {
                     "timestamp": datetime.now().isoformat(),
                     "queues": queues_data,
@@ -1868,7 +2307,9 @@ class QueueWebSocketServer:
                     "total_waiting": sum(q.calls for q in queues),
                     "total_available": sum(q.available_members for q in queues),
                     "total_busy": sum(q.busy_members for q in queues),
-                    "analytics": analytics_data
+                    "total_logged_agents": total_logged_agents,
+                    "analytics": analytics_data,
+                    "dynamic_ports": dynamic_ports_info
                 }
                 
                 # Solo enviar si hay cambios
@@ -1881,6 +2322,13 @@ class QueueWebSocketServer:
                         "type": "queue_update",
                         "data": current_data
                     })
+                    
+                    # Broadcast a puertos dinámicos también
+                    if DYNAMIC_PORTS_ENABLED and self.dynamic_port_manager:
+                        await self.dynamic_port_manager.broadcast_to_all_ports({
+                            "type": "queue_update",
+                            "data": current_data
+                        })
                     
                     # Guardar en Redis
                     if self.redis_client:
@@ -1914,7 +2362,7 @@ class QueueWebSocketServer:
         ssl_context = self._create_ssl_context()
         protocol = "wss" if ssl_context else "ws"
         
-        # Iniciar servidor WebSocket
+        # Iniciar servidor WebSocket principal
         server = await websockets.serve(
             self.handle_client,
             self.host,
@@ -1924,7 +2372,23 @@ class QueueWebSocketServer:
             ping_timeout=10
         )
         
-        logger.info(f"🚀 Servidor WebSocket iniciado en {protocol}://{self.host}:{self.port}")
+        logger.info(f"🚀 Servidor WebSocket principal iniciado en {protocol}://{self.host}:{self.port}")
+        
+        # Inicializar gestor de puertos dinámicos si está habilitado
+        if DYNAMIC_PORTS_ENABLED:
+            self.dynamic_port_manager = DynamicPortManager(
+                host=self.host,
+                base_port=BASE_DYNAMIC_PORT,
+                agents_per_port=AGENTS_PER_PORT,
+                max_ports=MAX_DYNAMIC_PORTS,
+                min_ports=MIN_DYNAMIC_PORTS,
+                ssl_cert=self.ssl_cert,
+                ssl_key=self.ssl_key
+            )
+            self.dynamic_port_manager.shared_analytics = self.analytics
+            await self.dynamic_port_manager.initialize()
+            logger.info(f"📡 Puertos dinámicos habilitados: {AGENTS_PER_PORT} agentes/puerto, "
+                        f"rango {BASE_DYNAMIC_PORT}-{BASE_DYNAMIC_PORT + MAX_DYNAMIC_PORTS - 1}")
         
         # Iniciar loop de monitoreo
         monitor_task = asyncio.create_task(self.monitor_loop())
@@ -1942,6 +2406,9 @@ class QueueWebSocketServer:
                 await self.ami.disconnect()
             if self.analytics:
                 self.analytics._save_model()
+            # Detener puertos dinámicos
+            if self.dynamic_port_manager:
+                await self.dynamic_port_manager.shutdown()
             server.close()
             await server.wait_closed()
     
@@ -2076,6 +2543,20 @@ if __name__ == "__main__":
     parser.add_argument("-p", "--password", default=AMI_SECRET,
                         help="Contraseña AMI")
     
+    # Argumentos para puertos dinámicos
+    parser.add_argument("--dynamic-ports", action="store_true", default=DYNAMIC_PORTS_ENABLED,
+                        help="Habilitar puertos dinámicos por agentes (default: habilitado)")
+    parser.add_argument("--no-dynamic-ports", action="store_true",
+                        help="Deshabilitar puertos dinámicos")
+    parser.add_argument("--agents-per-port", type=int, default=AGENTS_PER_PORT,
+                        help=f"Agentes por puerto dinámico (default: {AGENTS_PER_PORT})")
+    parser.add_argument("--base-dynamic-port", type=int, default=BASE_DYNAMIC_PORT,
+                        help=f"Puerto base para puertos dinámicos (default: {BASE_DYNAMIC_PORT})")
+    parser.add_argument("--max-dynamic-ports", type=int, default=MAX_DYNAMIC_PORTS,
+                        help=f"Máximo de puertos dinámicos (default: {MAX_DYNAMIC_PORTS})")
+    parser.add_argument("--min-dynamic-ports", type=int, default=MIN_DYNAMIC_PORTS,
+                        help=f"Mínimo de puertos dinámicos (default: {MIN_DYNAMIC_PORTS})")
+    
     args = parser.parse_args()
     
     # Actualizar configuración global
@@ -2085,7 +2566,24 @@ if __name__ == "__main__":
     AMI_SECRET = args.password
     MONITOR_INTERVAL = args.interval
     
+    # Configuración de puertos dinámicos
+    DYNAMIC_PORTS_ENABLED = args.dynamic_ports and not args.no_dynamic_ports
+    AGENTS_PER_PORT = args.agents_per_port
+    BASE_DYNAMIC_PORT = args.base_dynamic_port
+    MAX_DYNAMIC_PORTS = args.max_dynamic_ports
+    MIN_DYNAMIC_PORTS = args.min_dynamic_ports
+    
     if args.mode == "ws":
+        # Mostrar configuración de puertos dinámicos
+        if DYNAMIC_PORTS_ENABLED:
+            print(f"\n📡 Puertos Dinámicos HABILITADOS:")
+            print(f"   - Agentes por puerto: {AGENTS_PER_PORT}")
+            print(f"   - Rango de puertos: {BASE_DYNAMIC_PORT}-{BASE_DYNAMIC_PORT + MAX_DYNAMIC_PORTS - 1}")
+            print(f"   - Mínimo puertos activos: {MIN_DYNAMIC_PORTS}")
+            print(f"   Ejemplo: 15 agentes = {(15 + AGENTS_PER_PORT - 1) // AGENTS_PER_PORT} puertos\n")
+        else:
+            print("\n⚠️ Puertos dinámicos DESHABILITADOS\n")
+        
         # Modo WebSocket Server
         asyncio.run(run_websocket_server(
             host=args.ws_host,
