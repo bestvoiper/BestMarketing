@@ -1379,16 +1379,23 @@ class DynamicPortManager:
         Actualiza el número de agentes y ajusta los puertos dinámicamente.
         Llamar esto cada vez que cambie el número de agentes logueados.
         """
+        prev_agents = self.current_logged_agents
         self.current_logged_agents = logged_agents
         ports_needed = self.calculate_ports_needed(logged_agents)
         
         current_ports = len(self.active_servers)
         
+        # Log cuando cambia el número de agentes (solo si es significativo)
+        if prev_agents != logged_agents and (prev_agents == 0 or logged_agents == 0 or 
+            abs(prev_agents - logged_agents) >= self.agents_per_port // 2):
+            logger.info(f"👥 Agentes conectados: {prev_agents} → {logged_agents} "
+                        f"(puertos necesarios: {ports_needed})")
+        
         if ports_needed == current_ports:
             return  # No hay cambios necesarios
         
         logger.info(f"📊 Ajustando puertos: {current_ports} → {ports_needed} "
-                    f"(agentes: {logged_agents})")
+                    f"(agentes conectados: {logged_agents})")
         
         if ports_needed > current_ports:
             # Necesitamos más puertos
@@ -2270,9 +2277,27 @@ class QueueWebSocketServer:
                 # Preparar datos para broadcast
                 queues_data = [q.to_dict() for q in queues]
                 
-                # Calcular total de agentes logueados (no pausados)
+                # Calcular total de agentes REALMENTE logueados (conectados y no pausados)
+                # Estados válidos para considerar como "logueado":
+                #   1 = No en uso (disponible)
+                #   2 = En uso (en llamada)
+                #   3 = Ocupado
+                #   6 = Timbrando
+                #   7 = Timbrando en uso
+                #   8 = En espera
+                # Excluir:
+                #   0 = Desconocido
+                #   4 = Inválido
+                #   5 = No disponible (desconectado)
+                VALID_LOGGED_STATES = {1, 2, 3, 6, 7, 8}
                 total_logged_agents = sum(
-                    len([m for m in q.members if not m.paused]) 
+                    len([m for m in q.members if not m.paused and m.status in VALID_LOGGED_STATES]) 
+                    for q in queues
+                )
+                
+                # También calcular agentes desconectados para logging
+                total_disconnected_agents = sum(
+                    len([m for m in q.members if m.status in {0, 4, 5}]) 
                     for q in queues
                 )
                 
@@ -2308,6 +2333,7 @@ class QueueWebSocketServer:
                     "total_available": sum(q.available_members for q in queues),
                     "total_busy": sum(q.busy_members for q in queues),
                     "total_logged_agents": total_logged_agents,
+                    "total_disconnected_agents": total_disconnected_agents,
                     "analytics": analytics_data,
                     "dynamic_ports": dynamic_ports_info
                 }
