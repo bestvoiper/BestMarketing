@@ -212,11 +212,14 @@ class DialerLoadBalancer:
                         continue
                     
                     try:
-                        # Test de conexión WebSocket
+                        # Test de conexión WebSocket - enviar ping válido
                         test_ws = await asyncio.wait_for(
                             websockets.connect(f"ws://127.0.0.1:{port}", close_timeout=2),
                             timeout=3
                         )
+                        # Enviar un ping JSON válido antes de cerrar
+                        await test_ws.send('{"type":"ping"}')
+                        await asyncio.sleep(0.1)  # Esperar respuesta brevemente
                         await test_ws.close()
                         
                         if not self.backend_stats[port]['healthy']:

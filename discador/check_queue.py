@@ -10,6 +10,8 @@ import ssl
 import statistics
 import pickle
 import os
+import subprocess
+import signal
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Set, Tuple, Any
@@ -70,6 +72,12 @@ AGENTS_PER_PORT = 5  # Crear un puerto por cada 5 agentes logueados
 BASE_DYNAMIC_PORT = 8770  # Puerto base para puertos dinámicos (8770, 8771, 8772, etc.)
 MAX_DYNAMIC_PORTS = 20  # Máximo número de puertos dinámicos
 MIN_DYNAMIC_PORTS = 1  # Mínimo puertos activos (aunque no haya agentes)
+
+# Configuración de VOSK AMD para puertos dinámicos
+VOSK_ENABLED = True  # Habilitar inicio automático de VOSK en cada puerto
+VOSK_SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "..", "AMD_PRO", "vosk_cli_args.py")
+VOSK_WORKING_DIR = os.path.join(os.path.dirname(__file__), "..", "AMD_PRO")
+VOSK_STARTUP_DELAY = 0.5  # Segundos de espera después de iniciar VOSK
 
 # Configuración Redis (para persistencia de métricas)
 REDIS_HOST = "localhost"
@@ -1134,13 +1142,15 @@ class DynamicPortManager:
     Gestor de puertos dinámicos para el discador.
     Crea/destruye servidores WebSocket basándose en la cantidad de agentes logueados.
     Regla: 1 puerto por cada AGENTS_PER_PORT agentes (default: 5 agentes).
+    También inicia/detiene procesos VOSK para AMD en cada puerto.
     """
     
     def __init__(self, host: str = WS_HOST, base_port: int = BASE_DYNAMIC_PORT,
                  agents_per_port: int = AGENTS_PER_PORT,
                  max_ports: int = MAX_DYNAMIC_PORTS,
                  min_ports: int = MIN_DYNAMIC_PORTS,
-                 ssl_cert: str = None, ssl_key: str = None):
+                 ssl_cert: str = None, ssl_key: str = None,
+                 vosk_enabled: bool = VOSK_ENABLED):
         self.host = host
         self.base_port = base_port
         self.agents_per_port = agents_per_port
@@ -1148,11 +1158,15 @@ class DynamicPortManager:
         self.min_ports = min_ports
         self.ssl_cert = ssl_cert
         self.ssl_key = ssl_key
+        self.vosk_enabled = vosk_enabled
         
         # Servidores activos: {puerto: servidor_websocket}
         self.active_servers: Dict[int, Any] = {}
         self.server_clients: Dict[int, Set] = {}  # Clientes por puerto
         self.server_tasks: Dict[int, asyncio.Task] = {}  # Tasks por puerto
+        
+        # Procesos VOSK activos: {puerto: subprocess.Popen}
+        self.vosk_processes: Dict[int, subprocess.Popen] = {}
         
         # Estado de agentes
         self.current_logged_agents = 0
@@ -1168,8 +1182,18 @@ class DynamicPortManager:
         # Historial de cambios
         self.port_history: List[Dict] = []
         
+        # Verificar que el script VOSK existe
+        if self.vosk_enabled:
+            vosk_path = os.path.abspath(VOSK_SCRIPT_PATH)
+            if os.path.exists(vosk_path):
+                logger.info(f"✅ VOSK habilitado: {vosk_path}")
+            else:
+                logger.warning(f"⚠️ Script VOSK no encontrado: {vosk_path}")
+                logger.warning(f"   VOSK deshabilitado para puertos dinámicos")
+                self.vosk_enabled = False
+        
         logger.info(f"📡 DynamicPortManager inicializado: {agents_per_port} agentes/puerto, "
-                    f"rango {base_port}-{base_port + max_ports - 1}")
+                    f"rango {base_port}-{base_port + max_ports - 1}, VOSK: {'✅' if self.vosk_enabled else '❌'}")
     
     def _create_ssl_context(self) -> Optional[ssl.SSLContext]:
         """Crea contexto SSL si hay certificados configurados"""
@@ -1181,6 +1205,122 @@ class DynamicPortManager:
             except Exception as e:
                 logger.error(f"Error cargando certificados SSL: {e}")
         return None
+    
+    def _start_vosk_process(self, port: int) -> bool:
+        """Inicia un proceso VOSK para el puerto especificado"""
+        if not self.vosk_enabled:
+            return True  # Si VOSK está deshabilitado, retornar éxito
+        
+        if port in self.vosk_processes:
+            proc = self.vosk_processes[port]
+            if proc.poll() is None:  # Proceso aún corriendo
+                logger.warning(f"⚠️ [VOSK] Proceso ya existe para puerto {port}")
+                return True
+        
+        try:
+            vosk_path = os.path.abspath(VOSK_SCRIPT_PATH)
+            working_dir = os.path.abspath(VOSK_WORKING_DIR)
+            
+            cmd = ["python3", vosk_path, "--port", str(port)]
+            
+            env = os.environ.copy()
+            env["ERALYWS_NAME"] = f"vosk_dynamic_{port}"
+            env["WEBSOCKET_PORT"] = str(port)
+            
+            logger.info(f"🎧 [VOSK] Iniciando proceso para puerto {port}...")
+            logger.debug(f"   Comando: {' '.join(cmd)}")
+            logger.debug(f"   Working dir: {working_dir}")
+            
+            process = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=working_dir,
+                preexec_fn=os.setsid if hasattr(os, 'setsid') else None
+            )
+            
+            # Esperar un poco para verificar que inició correctamente
+            import time
+            time.sleep(VOSK_STARTUP_DELAY)
+            
+            if process.poll() is None:  # Proceso sigue corriendo
+                self.vosk_processes[port] = process
+                logger.info(f"✅ [VOSK] Proceso iniciado para puerto {port} - PID {process.pid}")
+                return True
+            else:
+                # Proceso terminó prematuramente
+                stdout, stderr = process.communicate()
+                error_msg = stderr.decode() if stderr else stdout.decode() if stdout else "Sin mensaje"
+                logger.error(f"❌ [VOSK] Proceso falló al iniciar para puerto {port}: {error_msg[:200]}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ [VOSK] Error iniciando proceso para puerto {port}: {e}")
+            return False
+    
+    def _stop_vosk_process(self, port: int) -> bool:
+        """Detiene el proceso VOSK para el puerto especificado"""
+        if port not in self.vosk_processes:
+            return True
+        
+        try:
+            process = self.vosk_processes[port]
+            
+            if process.poll() is None:  # Proceso sigue corriendo
+                logger.info(f"🛑 [VOSK] Deteniendo proceso para puerto {port} (PID {process.pid})...")
+                
+                # Intentar terminar gracefully primero
+                try:
+                    if hasattr(os, 'killpg'):
+                        os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                    else:
+                        process.terminate()
+                except ProcessLookupError:
+                    pass  # El proceso ya terminó
+                
+                # Esperar hasta 3 segundos
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    # Forzar kill si no responde
+                    try:
+                        if hasattr(os, 'killpg'):
+                            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                        else:
+                            process.kill()
+                    except ProcessLookupError:
+                        pass
+                
+                logger.info(f"✅ [VOSK] Proceso detenido para puerto {port}")
+            
+            del self.vosk_processes[port]
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ [VOSK] Error deteniendo proceso para puerto {port}: {e}")
+            # Intentar limpiar de todas formas
+            self.vosk_processes.pop(port, None)
+            return False
+    
+    def _check_vosk_process(self, port: int) -> bool:
+        """Verifica si el proceso VOSK para un puerto está corriendo"""
+        if not self.vosk_enabled:
+            return True
+        
+        if port not in self.vosk_processes:
+            return False
+        
+        return self.vosk_processes[port].poll() is None
+    
+    async def _ensure_vosk_running(self, port: int):
+        """Asegura que el proceso VOSK esté corriendo para un puerto"""
+        if not self.vosk_enabled:
+            return
+        
+        if not self._check_vosk_process(port):
+            logger.warning(f"⚠️ [VOSK] Proceso caído para puerto {port}, reiniciando...")
+            self._start_vosk_process(port)
     
     def calculate_ports_needed(self, logged_agents: int) -> int:
         """Calcula cuántos puertos se necesitan basándose en agentes logueados"""
@@ -1223,13 +1363,28 @@ class DynamicPortManager:
             # Mantener conexión y procesar mensajes
             async for message in websocket:
                 try:
+                    # Asegurar que el mensaje sea string (puede venir como bytes)
+                    if isinstance(message, bytes):
+                        try:
+                            message = message.decode('utf-8')
+                        except UnicodeDecodeError:
+                            logger.debug(f"⚠️ Mensaje binario no UTF-8 ignorado ({len(message)} bytes)")
+                            continue
+                    
+                    # Ignorar mensajes vacíos
+                    if not message or not message.strip():
+                        continue
+                    
                     data = json.loads(message)
                     await self._handle_client_message(websocket, data, port)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as e:
+                    logger.debug(f"⚠️ JSON inválido: {e}")
                     await websocket.send(json.dumps({
                         "type": "error",
                         "message": "Invalid JSON"
                     }))
+                except Exception as e:
+                    logger.debug(f"⚠️ Error procesando mensaje: {e}")
         except websockets.exceptions.ConnectionClosed:
             pass
         finally:
@@ -1286,13 +1441,41 @@ class DynamicPortManager:
                 clients.discard(client)
     
     async def start_port(self, port: int) -> bool:
-        """Inicia un servidor WebSocket en el puerto especificado"""
+        """
+        Inicia un puerto para el discador.
+        Si VOSK está habilitado, solo inicia el proceso VOSK (que crea su propio servidor WS).
+        Si VOSK está deshabilitado, crea un servidor WebSocket local.
+        """
         async with self._lock:
             if port in self.active_servers:
                 logger.warning(f"⚠️ Puerto {port} ya está activo")
                 return False
             
             try:
+                # Si VOSK está habilitado, solo iniciamos el proceso VOSK
+                # VOSK crea su propio servidor WebSocket
+                if self.vosk_enabled:
+                    vosk_started = self._start_vosk_process(port)
+                    if vosk_started:
+                        # Marcar puerto como activo (VOSK es el servidor)
+                        self.active_servers[port] = "vosk"  # Marcador especial
+                        self.server_clients[port] = set()
+                        logger.info(f"🚀 [VOSK] Puerto {port} activo (servidor VOSK)")
+                        
+                        # Registrar en historial
+                        self.port_history.append({
+                            "action": "start",
+                            "port": port,
+                            "timestamp": datetime.now().isoformat(),
+                            "logged_agents": self.current_logged_agents,
+                            "server_type": "vosk"
+                        })
+                        return True
+                    else:
+                        logger.error(f"❌ No se pudo iniciar VOSK para puerto {port}")
+                        return False
+                
+                # Si VOSK está deshabilitado, crear servidor WebSocket local
                 ssl_context = self._create_ssl_context()
                 
                 # Crear handler específico para este puerto
@@ -1319,7 +1502,8 @@ class DynamicPortManager:
                     "action": "start",
                     "port": port,
                     "timestamp": datetime.now().isoformat(),
-                    "logged_agents": self.current_logged_agents
+                    "logged_agents": self.current_logged_agents,
+                    "server_type": "websocket"
                 })
                 
                 return True
@@ -1329,7 +1513,11 @@ class DynamicPortManager:
                 return False
     
     async def stop_port(self, port: int) -> bool:
-        """Detiene un servidor WebSocket en el puerto especificado"""
+        """
+        Detiene un puerto.
+        Si es VOSK, detiene el proceso VOSK.
+        Si es servidor WebSocket local, cierra el servidor.
+        """
         async with self._lock:
             if port not in self.active_servers:
                 logger.warning(f"⚠️ Puerto {port} no está activo")
@@ -1338,28 +1526,35 @@ class DynamicPortManager:
             try:
                 server = self.active_servers[port]
                 
-                # Notificar a clientes antes de cerrar
-                clients = self.server_clients.get(port, set())
-                for client in list(clients):
-                    try:
-                        await client.send(json.dumps({
-                            "type": "port_closing",
-                            "message": f"Puerto {port} se está cerrando. Reconectar a otro puerto.",
-                            "available_ports": [p for p in self.active_servers.keys() if p != port]
-                        }))
-                        await client.close()
-                    except:
-                        pass
+                # Si es un servidor VOSK (marcador "vosk")
+                if server == "vosk":
+                    # Solo detener el proceso VOSK
+                    self._stop_vosk_process(port)
+                    logger.info(f"🛑 [VOSK] Puerto {port} detenido")
+                else:
+                    # Es un servidor WebSocket local
+                    # Notificar a clientes antes de cerrar
+                    clients = self.server_clients.get(port, set())
+                    for client in list(clients):
+                        try:
+                            await client.send(json.dumps({
+                                "type": "port_closing",
+                                "message": f"Puerto {port} se está cerrando. Reconectar a otro puerto.",
+                                "available_ports": [p for p in self.active_servers.keys() if p != port]
+                            }))
+                            await client.close()
+                        except:
+                            pass
+                    
+                    # Cerrar servidor WebSocket
+                    server.close()
+                    await server.wait_closed()
+                    logger.info(f"🛑 [Dinámico] Puerto {port} detenido")
                 
-                # Cerrar servidor
-                server.close()
-                await server.wait_closed()
-                
+                # Limpiar registros
                 del self.active_servers[port]
                 if port in self.server_clients:
                     del self.server_clients[port]
-                
-                logger.info(f"🛑 [Dinámico] Puerto {port} detenido")
                 
                 # Registrar en historial
                 self.port_history.append({
@@ -1432,6 +1627,16 @@ class DynamicPortManager:
     
     def get_status(self) -> Dict:
         """Retorna el estado actual del gestor de puertos"""
+        # Info de procesos VOSK
+        vosk_status = {}
+        if self.vosk_enabled:
+            for port in self.active_servers.keys():
+                vosk_running = self._check_vosk_process(port)
+                vosk_status[port] = {
+                    "running": vosk_running,
+                    "pid": self.vosk_processes[port].pid if port in self.vosk_processes else None
+                }
+        
         return {
             "enabled": DYNAMIC_PORTS_ENABLED,
             "ready": self.is_ready(),
@@ -1445,6 +1650,8 @@ class DynamicPortManager:
             "base_port": self.base_port,
             "max_ports": self.max_ports,
             "min_ports": self.min_ports,
+            "vosk_enabled": self.vosk_enabled,
+            "vosk_processes": vosk_status,
             "recent_changes": self.port_history[-10:] if self.port_history else []
         }
     
@@ -1807,12 +2014,22 @@ class QueueWebSocketServer:
         try:
             async for message in websocket:
                 try:
+                    # Asegurar que el mensaje sea string (puede venir como bytes)
+                    if isinstance(message, bytes):
+                        message = message.decode('utf-8', errors='replace')
+                    
                     data = json.loads(message)
                     await self.handle_message(websocket, data)
                 except json.JSONDecodeError:
                     await websocket.send(json.dumps({
                         "type": "error",
                         "message": "Invalid JSON"
+                    }))
+                except UnicodeDecodeError as e:
+                    logger.warning(f"⚠️ Error decodificando mensaje: {e}")
+                    await websocket.send(json.dumps({
+                        "type": "error",
+                        "message": "Invalid encoding, use UTF-8"
                     }))
         except websockets.exceptions.ConnectionClosed:
             pass
