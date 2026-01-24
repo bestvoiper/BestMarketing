@@ -350,9 +350,15 @@ class DialerSender(BaseSender):
                 await asyncio.sleep(5)
     
     async def cleanup(self):
-        """Limpia recursos"""
+        """
+        Limpia recursos.
+        
+        NOTA: NO desconectamos DialerClient ni ESL inmediatamente porque
+        las llamadas pueden seguir en progreso (AMD detection, etc.).
+        Las conexiones se cierran solas por timeout o inactividad.
+        """
         try:
-            # Detener task de status
+            # Detener task de status (ya no necesitamos monitorear agentes)
             if self._status_task:
                 self._status_task.cancel()
                 try:
@@ -360,15 +366,16 @@ class DialerSender(BaseSender):
                 except asyncio.CancelledError:
                     pass
             
-            # Desconectar DialerClient
-            if self.dialer_client:
-                await self.dialer_client.disconnect()
+            # NO desconectamos DialerClient - las llamadas aún pueden necesitarlo
+            # La conexión se cerrará sola por timeout/inactividad
+            self.logger.info("🔄 Campaña finalizada - conexiones permanecen activas para llamadas en curso")
             
-            # Desconectar ESL
-            if self.esl_connection and self.esl_connection.connected():
-                self.esl_connection.disconnect()
+            # NO desconectamos ESL - puede haber llamadas en progreso
+            # if self.esl_connection and self.esl_connection.connected():
+            #     self.esl_connection.disconnect()
             
-            self.esl_executor.shutdown(wait=False)
+            # Executor se limpia solo cuando ya no hay tareas
+            # self.esl_executor.shutdown(wait=False)
         except:
             pass
     
