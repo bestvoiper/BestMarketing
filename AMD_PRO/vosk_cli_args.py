@@ -151,7 +151,7 @@ async def cleanup_stale_connections():
                 if ws_id in connection_timestamps:
                     if current_time - connection_timestamps[ws_id] > 300:
                         stale_connections.append(ws)
-                        print(f"⏰ Conexión expirada por timeout: {ws.remote_address}")
+                        print(f"⏰ Conexión expirada por timeout: {ws.remote_address}", flush=True)
             
             # Limpiar conexiones obsoletas
             for ws in stale_connections:
@@ -161,38 +161,45 @@ async def cleanup_stale_connections():
                     if not ws.closed:
                         await ws.close(code=1001, reason="Connection timeout")
                 except Exception as e:
-                    print(f"⚠️ Error cerrando conexión obsoleta: {e}")
+                    print(f"⚠️ Error cerrando conexión obsoleta: {e}", flush=True)
             
             if stale_connections:
-                print(f"🧹 Limpiadas {len(stale_connections)} conexiones obsoletas")
+                print(f"🧹 Limpiadas {len(stale_connections)} conexiones obsoletas", flush=True)
                 
         except Exception as e:
-            print(f"🚨 Error en cleanup de conexiones: {e}")
+            import traceback
+            print(f"🚨 Error en cleanup de conexiones: {e}", flush=True)
+            print(traceback.format_exc(), flush=True)
 
 async def handle_connection(websocket, path=None):
     connection_path = None
     uuid = None
     numero = None
     campaign = None
+    
+    # Log inmediato al recibir conexión
+    print(f"🔔 Conexión entrante desde: {websocket.remote_address}", flush=True)
+    print(f"   Path arg: {path}", flush=True)
+    print(f"   websocket type: {type(websocket)}", flush=True)
 
     try:
         # Intentar obtener el path de diferentes maneras según la versión de websockets
         if path is not None:
             # Versiones más antiguas pasan el path como parámetro
             connection_path = path
-            print(f"🔗 Path obtenido como parámetro: {connection_path}")
+            print(f"🔗 Path obtenido como parámetro: {connection_path}", flush=True)
         elif hasattr(websocket, 'path') and websocket.path:
             connection_path = websocket.path
-            print(f"🔗 Path obtenido de websocket.path: {connection_path}")
+            print(f"🔗 Path obtenido de websocket.path: {connection_path}", flush=True)
         elif hasattr(websocket, 'request_uri') and websocket.request_uri:
             connection_path = websocket.request_uri
-            print(f"🔗 Path obtenido de websocket.request_uri: {connection_path}")
+            print(f"🔗 Path obtenido de websocket.request_uri: {connection_path}", flush=True)
         elif hasattr(websocket, 'uri') and websocket.uri:
             connection_path = websocket.uri
-            print(f"🔗 Path obtenido de websocket.uri: {connection_path}")
+            print(f"🔗 Path obtenido de websocket.uri: {connection_path}", flush=True)
         elif hasattr(websocket, 'request') and hasattr(websocket.request, 'path'):
             connection_path = websocket.request.path
-            print(f"🔗 Path obtenido de websocket.request.path: {connection_path}")
+            print(f"🔗 Path obtenido de websocket.request.path: {connection_path}", flush=True)
         else:
             # Intentar obtener información de headers o raw_request_line
             if hasattr(websocket, 'request_uri'):
@@ -201,11 +208,11 @@ async def handle_connection(websocket, path=None):
                 raw_line = str(websocket.raw_request_line)
                 if 'GET ' in raw_line and ' HTTP' in raw_line:
                     connection_path = raw_line.split('GET ')[1].split(' HTTP')[0]
-                    print(f"🔗 Path extraído de raw_request_line: {connection_path}")
+                    print(f"🔗 Path extraído de raw_request_line: {connection_path}", flush=True)
 
             if not connection_path:
-                print(f"❌ No se pudo obtener el path de la conexión WebSocket")
-                print(f"📊 Atributos disponibles en websocket: {[attr for attr in dir(websocket) if not attr.startswith('_')]}")
+                print(f"❌ No se pudo obtener el path de la conexión WebSocket", flush=True)
+                print(f"📊 Atributos disponibles en websocket: {[attr for attr in dir(websocket) if not attr.startswith('_')]}", flush=True)
                 return
 
         if connection_path:
