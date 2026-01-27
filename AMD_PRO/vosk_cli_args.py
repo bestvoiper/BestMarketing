@@ -58,6 +58,11 @@ DB_URL = "mysql+pymysql://consultas:consultas@localhost/masivos"
 
 # === Guardar detección ===
 def save_buzon_uuid(uuid, text, tipo="final"):
+    # Asegurar que el directorio existe
+    recordings_dir = os.path.dirname(CSV_FILENAME)
+    if recordings_dir and not os.path.exists(recordings_dir):
+        os.makedirs(recordings_dir, exist_ok=True)
+    
     file_exists = os.path.isfile(CSV_FILENAME)
     with open(CSV_FILENAME, "a", newline='', encoding="utf-8") as csvfile:
         writer = csv.writer(csvfile)
