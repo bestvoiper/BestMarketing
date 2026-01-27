@@ -1245,11 +1245,15 @@ class DynamicPortManager:
             logger.debug(f"   Working dir: {working_dir}")
             logger.debug(f"   Modelo: {model_path}")
             
+            # Abrir archivo de log para VOSK
+            vosk_log_path = os.path.join(working_dir, f"vosk_{port}.log")
+            vosk_log_file = open(vosk_log_path, "a")
+            
             process = subprocess.Popen(
                 cmd,
                 env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=vosk_log_file,
+                stderr=subprocess.STDOUT,  # Combinar stderr con stdout
                 cwd=working_dir,
                 preexec_fn=os.setsid if hasattr(os, 'setsid') else None
             )

@@ -242,11 +242,22 @@ async def handle_connection(websocket, path=None):
     rec = KaldiRecognizer(model, SAMPLE_RATE, json.dumps(VOSK_GRAMMAR))
     rec.SetWords(True)
 
+    message_count = 0
+    bytes_received = 0
+    start_time = asyncio.get_event_loop().time()
+    
     try:
         async for message in websocket:
+            message_count += 1
             if isinstance(message, bytes):
+                bytes_received += len(message)
                 audio = np.frombuffer(message, dtype=np.int16)
                 detected = False
+                
+                # Log cada 100 mensajes
+                if message_count % 100 == 0:
+                    elapsed = asyncio.get_event_loop().time() - start_time
+                    print(f"📊 [{uuid}] {message_count} msgs, {bytes_received/1024:.1f}KB, {elapsed:.1f}s")
 
                 if rec.AcceptWaveform(audio.tobytes()):
                     result = json.loads(rec.Result())
@@ -292,11 +303,15 @@ async def handle_connection(websocket, path=None):
                         break
                 except Exception:
                     pass
-    except websockets.exceptions.ConnectionClosed:
-        print(f"🔌 Conexión cerrada por el cliente [{uuid}]")
+    except websockets.exceptions.ConnectionClosed as e:
+        elapsed = asyncio.get_event_loop().time() - start_time
+        print(f"🔌 Conexión cerrada por el cliente [{uuid}] code={e.code} reason='{e.reason}' after {message_count} msgs, {elapsed:.1f}s")
     except Exception as e:
-        print(f"🚨 Error en la conexión [{uuid}]: {e}")
+        elapsed = asyncio.get_event_loop().time() - start_time
+        print(f"🚨 Error en la conexión [{uuid}]: {type(e).__name__}: {e} after {message_count} msgs, {elapsed:.1f}s")
     finally:
+        elapsed = asyncio.get_event_loop().time() - start_time
+        print(f"🏁 [{uuid}] Finalizando - {message_count} msgs, {bytes_received/1024:.1f}KB, {elapsed:.1f}s")
         # Asegurar que el WebSocket se cierre completamente
         active_connections.discard(websocket)
         connection_timestamps.pop(id(websocket), None)

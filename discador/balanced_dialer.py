@@ -463,8 +463,8 @@ class DialerLoadBalancer:
                 websockets.connect(
                     backend_url,
                     max_size=None,
-                    ping_interval=None,
-                    ping_timeout=None,
+                    ping_interval=20,      # Coincidir con VOSK
+                    ping_timeout=10,       # Coincidir con VOSK
                     close_timeout=5
                 ),
                 timeout=5
@@ -501,13 +501,27 @@ class DialerLoadBalancer:
             
             # Proxy bidireccional
             try:
-                await asyncio.gather(
+                results = await asyncio.gather(
                     self.forward_messages(client_ws, backend_ws, f"FS->VOSK:{backend_port}", conn_id),
                     self.forward_messages(backend_ws, client_ws, f"VOSK:{backend_port}->FS", conn_id),
                     return_exceptions=True
                 )
+                # Log resultados del gather
+                for i, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        logger.debug(f"Proxy task {i} terminó con excepción: {result}")
             except Exception as e:
                 logger.debug(f"Proxy terminado para {client_addr}: {e}")
+            
+            # Determinar quién cerró primero
+            fs_closed = client_ws.closed
+            vosk_closed = backend_ws.closed if backend_ws else True
+            close_reason = []
+            if fs_closed:
+                close_reason.append(f"FS cerrado (code={getattr(client_ws, 'close_code', '?')})")
+            if vosk_closed:
+                close_reason.append(f"VOSK cerrado (code={getattr(backend_ws, 'close_code', '?') if backend_ws else 'N/A'})")
+            logger.info(f"📋 Razón cierre {client_addr}: {', '.join(close_reason)}")
             
         except asyncio.TimeoutError:
             logger.warning(f"❌ Timeout conectando a backend {backend_port}")
@@ -546,26 +560,45 @@ class DialerLoadBalancer:
     
     async def forward_messages(self, source, destination, direction, conn_id):
         """Reenviar mensajes entre WebSockets (texto y binario)"""
+        message_count = 0
+        bytes_transferred = 0
+        first_message_time = None
+        last_message_time = None
         try:
             async for message in source:
+                if first_message_time is None:
+                    first_message_time = time.time()
+                    logger.info(f"[{direction}] Primer mensaje recibido")
+                last_message_time = time.time()
+                
                 if conn_id not in self.active_connections:
-                    logger.debug(f"[{direction}] Conexión no encontrada, terminando")
+                    logger.info(f"[{direction}] Conexión no encontrada, terminando (msgs: {message_count})")
                     break
                 if destination.closed:
-                    logger.debug(f"[{direction}] Destino cerrado, terminando")
+                    logger.info(f"[{direction}] Destino cerrado, terminando (msgs: {message_count})")
                     break
                     
                 # Reenviar mensaje (texto o binario)
                 await destination.send(message)
+                message_count += 1
+                if isinstance(message, bytes):
+                    bytes_transferred += len(message)
+                
+                # Log cada 100 mensajes binarios (audio)
+                if message_count % 100 == 0 and isinstance(message, bytes):
+                    logger.info(f"[{direction}] {message_count} msgs, {bytes_transferred/1024:.1f}KB transferidos")
                 
         except websockets.exceptions.ConnectionClosedOK:
             # Cierre normal (código 1000)
-            logger.debug(f"[{direction}] Cierre normal")
+            logger.info(f"[{direction}] Cierre normal code=1000 (msgs: {message_count}, bytes: {bytes_transferred})")
         except websockets.exceptions.ConnectionClosedError as e:
             # Cierre con error
-            logger.debug(f"[{direction}] Cierre con error: {e.code} {e.reason}")
+            logger.info(f"[{direction}] Cierre con error: code={e.code} reason='{e.reason}' (msgs: {message_count})")
         except Exception as e:
-            logger.warning(f"[{direction}] Error forwarding: {type(e).__name__}: {e}")
+            logger.warning(f"[{direction}] Error forwarding: {type(e).__name__}: {e} (msgs: {message_count})")
+        finally:
+            duration = (last_message_time - first_message_time) if first_message_time and last_message_time else 0
+            logger.info(f"[{direction}] FIN - {message_count} msgs, {bytes_transferred/1024:.1f}KB, duración audio: {duration:.1f}s")
 
 
 # Instancia global
