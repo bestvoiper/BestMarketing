@@ -1,0 +1,46 @@
+<include>
+  <!-- Contexto principal para manejo de audio stream y transferencias -->
+  <context name="DETECT_AMD_PRO_DIALER">
+    <!-- Extension: Manejo de llamadas con audio stream automático -->
+    <extension name="audio_stream_handler">
+      <condition field="destination_number" expression="^2222$">
+        <!-- Si todo está bien, continuar -->
+        <action application="set" data="write_codec=L16@16000h"/>
+        <action application="set" data="record_sample_rate=16000"/>
+        <action application="log" data="INFO [${campaign_name} Llamada recibida para ${origination_caller_id_number} con UUID ${valid_uuid}"/>
+        <action application="set" data="campaign_name=${campaign_name}"/>
+        <action application="set" data="numero=${origination_caller_id_number}"/>
+        <action application="set" data="wss_url=wss://localhost:8080/audio?uuid=${uuid}&numero=${numero}&campaign=${campaign_name}"/>
+        <action application="log" data="INFO [${campaign_name}] WebSocket URL construida: ${wss_url}"/>
+        <!-- Manejo de error en comando system -->
+        <action application="log" data="INFO [${campaign_name}] Iniciando audio stream para ${numero}..."/>
+        <action application="system" data="fs_cli -p1Pl}0F~~801l -x 'uuid_audio_stream ${uuid} start ${wss_url} mono 16000'"/>
+        <action application="log" data="ERR Si el audio stream no inicia, revisar parámetros y conexión WebSocket"/>
+        <action application="set" data="execute_on_answer=system fs_cli -p1Pl}0F~~801l -x 'uuid_audio_stream ${uuid} stop'"/>
+        <action application="log" data="INFO [${campaign_name}] Transferencia automática a 9999@${campaign_name} en llamada contestada"/>
+        <action application="log" data="INFO [${campaign_name}] Audio stream iniciado para ${numero}"/>
+        <action application="log" data="INFO [${campaign_name}] Manteniendo llamada ${numero} en park..."/>
+        <action application="park"/>
+      </condition>
+    </extension>
+
+    <!-- Extension: Transferencias desde otros contextos -->
+    <extension name="transfer_handler">
+      <condition field="destination_number" expression="^9999$">
+        <!-- Validación de UUID -->
+        <action application="eval" data="${uuid} == ''"/>
+        <action application="log" data="ERR UUID vacío en transferencia"/>
+        <action application="hangup"/>
+        <!-- Log de transferencia -->
+        <action application="log" data="INFO [${origination_campaign_name}] Llamada transferida UUID ${uuid}"/>
+        <!-- Detener audio stream -->
+        <action application="log" data="INFO [${origination_campaign_name}] Deteniendo audio stream..."/>
+        <action application="system" data="fs_cli -p1Pl}0F~~801l -x 'uuid_audio_stream ${uuid} stop'"/>
+        <action application="log" data="ERR Si el audio stream no se detiene, revisar UUID y estado de llamada"/>
+        <!-- Mantener llamada en park -->
+        <action application="log" data="INFO [${origination_campaign_name}] Transferencia completada, manteniendo en park"/>
+        <action application="park"/>
+      </condition>
+    </extension>
+  </context>
+</include>

@@ -1234,7 +1234,7 @@ class DynamicPortManager:
                 logger.error(f"   Descarga el modelo de: https://alphacephei.com/vosk/models")
                 return False
             
-            cmd = ["python3", vosk_path, "--port", str(port), "--model-path", model_path]
+            cmd = ["python3", "-u", vosk_path, "--port", str(port), "--model-path", model_path]
             
             env = os.environ.copy()
             env["ERALYWS_NAME"] = f"vosk_dynamic_{port}"
